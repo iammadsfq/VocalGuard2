@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+num-complex = "0.4.6"
+realfft = "3.5.0"
+ndarray = { version = "0.17.2", features = ["blas"] }
+ndarray-linalg = { version = "0.18.1", features = ["openblas-static"] }
