@@ -3,8 +3,21 @@ name = "audioprocessor"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "audioprocessor"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "audioprocessor"
+path = "src/main.rs"
+
+[features]
+python = ["pyo3"]
+native = []
+
 [dependencies]
+pyo3 = { version = "0.28.3", features = ["extension-module"], optional = true }
 num-complex = "0.4.6"
 realfft = "3.5.0"
 ndarray = { version = "0.17.2", features = ["blas"] }
-ndarray-linalg = { version = "0.18.1", features = ["openblas-static"] }
+# ndarray-linalg = { version = "0.18.1", features = ["openblas-static"] }

@@ -1,4 +1,4 @@
-use ndarray::{Array1, Array2, ArrayView1, s};
+use ndarray::{Array1, Array2, s};
 use num_complex::Complex32;
 use realfft::{RealFftPlanner, RealToComplex};
 use std::{f32::consts::PI, sync::Arc, vec};

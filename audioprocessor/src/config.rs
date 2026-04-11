@@ -18,7 +18,7 @@ impl Default for LfccConfig {
             frame_step_ms: 10.0,
             num_linear_filters: 40,
             num_cepstral_coeffs: 20,
-            fft_size: 512
+            fft_size: 512,
         }
     }
 }
