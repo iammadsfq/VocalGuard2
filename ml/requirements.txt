@@ -1,0 +1,9 @@
+numpy
+pandas
+soundfile
+tqdm
+maturin
+pyarrow
+tensorflow>=2.10
+scikit-learn
+matplotlib

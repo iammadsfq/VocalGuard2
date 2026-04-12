@@ -18,6 +18,62 @@ use pyo3::prelude::*;
 pub use batch_shell::process_batch;
 pub use config::LfccConfig;
 
+#[cfg(feature = "python")]
+#[pyclass(name = "LfccSpectrogramConverter")]
+#[derive(Clone)]
+struct PyLfccSpectrogramConverter {
+    config: LfccConfig,
+}
+
+#[cfg(feature = "python")]
+#[pymethods]
+impl PyLfccSpectrogramConverter {
+    #[new]
+    #[pyo3(signature = (
+        sample_rate = 16000,
+        pre_emphasis_alpha = 0.97,
+        frame_length_ms = 25.0,
+        frame_step_ms = 10.0,
+        num_linear_filters = 40,
+        num_cepstral_coeffs = 20,
+        fft_size = 512,
+    ))]
+    fn new(
+        sample_rate: usize,
+        pre_emphasis_alpha: f32,
+        frame_length_ms: f32,
+        frame_step_ms: f32,
+        num_linear_filters: usize,
+        num_cepstral_coeffs: usize,
+        fft_size: usize,
+    ) -> Self {
+        Self {
+            config: LfccConfig {
+                sample_rate,
+                pre_emphasis_alpha,
+                frame_length_ms,
+                frame_step_ms,
+                num_linear_filters,
+                num_cepstral_coeffs,
+                fft_size,
+            },
+        }
+    }
+
+    /// Convert one mono audio window into flattened CHW LFCC tensor.
+    /// Returns a float list with shape equivalent to (3, 224, 224).
+    fn convert_window(&self, samples: Vec<f32>) -> PyResult<Vec<f32>> {
+        process_batch(&samples, self.config.clone())
+            .map(|out| out.data)
+            .ok_or_else(|| {
+                PyValueError::new_err(
+                    "Audio clip is too short to produce even one LFCC frame. \
+                     Provide at least frame_length_ms of audio.",
+                )
+            })
+    }
+}
+
 /// Python-visible function: `extract_lfcc_tensor(samples, config_kwargs) -> list[float]`
 ///
 /// # Python usage
@@ -73,14 +129,15 @@ fn extract_lfcc_tensor(
         })
 }
 
-/// The compiled Python module is named `lfcc_rs`.
+/// The compiled Python module is named `audioprocessor`.
 ///
 /// Build with:
 ///   maturin develop          # editable install for development
 ///   maturin build --release  # wheel for distribution
 #[cfg(feature = "python")]
 #[pymodule]
-fn lfcc_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn audioprocessor(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyLfccSpectrogramConverter>()?;
     m.add_function(wrap_pyfunction!(extract_lfcc_tensor, m)?)?;
     Ok(())
 }
