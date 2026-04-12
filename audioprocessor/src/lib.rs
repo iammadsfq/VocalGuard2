@@ -1,6 +1,7 @@
 mod batch_shell;
 mod config;
 mod core;
+pub mod converter;
 // mod stream_shell;  // reserved for real-time path — not yet implemented
 
 // ---------------------------------------------------------------------------
@@ -13,6 +14,9 @@ mod core;
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
+
+pub use batch_shell::process_batch;
+pub use config::LfccConfig;
 
 /// Python-visible function: `extract_lfcc_tensor(samples, config_kwargs) -> list[float]`
 ///

@@ -1,3 +1,7 @@
+mod batch_shell;
+mod config;
+mod core;
+
 use batch_shell::process_batch;
 use config::LfccConfig;
 
