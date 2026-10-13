@@ -1,6 +1,17 @@
 import nbformat as nbf
 
 nb = nbf.v4.new_notebook()
+nb.metadata = {
+    "kernelspec": {
+        "display_name": "Python 3",
+        "language": "python",
+        "name": "python3"
+    },
+    "language_info": {
+        "name": "python",
+        "version": "3.10.12"
+    }
+}
 
 # Cell 1: Markdown
 c1 = nbf.v4.new_markdown_cell(
