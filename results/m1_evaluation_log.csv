@@ -1,0 +1,2 @@
+Model,Fitur,Window,Trimming,Params,Best Dev EER,Baseline B0 EER,Gate G2 Status
+M1 LCNN,LFCC (60-dim: 20 static + delta + delta2),4 s wrap/truncate,tidak,539714,0.37%,32.18%,PASSED ✅
