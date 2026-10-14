@@ -80,3 +80,34 @@ with torch.no_grad():
     prediction = "bonafide" if score > -1.1896 else "spoof"
     print(f"Prediction: {prediction} (Score: {score:.4f})")
 ```
+
+---
+
+## ⚡ Kuantisasi & Benchmark Inferensi CPU On-Device (RQ3)
+
+Pengujian latensi dan kuantisasi dilakukan pada **Intel Core i7-8665U @ 1.90GHz** untuk mengevaluasi kelayakan deteksi spoofing audio secara real-time pada robot sosial dan panggilan telepon streaming.
+
+### 💾 Kompresi Model
+* **PyTorch FP32 Checkpoint:** `2.08 MB`
+* **ONNX FP32 Model:** `2.08 MB`
+* **ONNX Dynamic INT8 Model:** **`0.56 MB`** (**Kompresi 73.0%** 📉)
+
+### ⏱️ Latensi & Real-Time Factor (RTF)
+
+$$\text{RTF} = \frac{\text{Latency (detik)}}{\text{Durasi Audio (detik)}}$$
+*(Model streaming real-time wajib memiliki $\text{RTF} \ll 1.0$)*
+
+| Skenario Audio | Format & Runtime | Threads | Latensi Rata-rata (ms) | p95 Latensi (ms) | RTF | Status Streaming |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **4.0s Full Utterance** (399 frames) | PyTorch FP32 | 1 Core | 38.90 ms | 42.90 ms | 0.0097 | Real-Time ✅ |
+| | ONNX Runtime FP32 | 1 Core | **22.28 ms** | 26.08 ms | **0.0056** | Ultra-Fast ⚡ |
+| | ONNX Dynamic INT8 | 1 Core | 125.57 ms | 142.99 ms | 0.0314 | Real-Time ✅ |
+| | ONNX Dynamic INT8 | 4 Cores | **66.12 ms** | 78.30 ms | **0.0165** | Real-Time ✅ |
+| **1.28s Streaming Chunk** (128 frames) | PyTorch FP32 | 1 Core | 17.50 ms | 24.18 ms | 0.0137 | Ultra-Fast ⚡ |
+| | ONNX Runtime FP32 | 1 Core | **9.62 ms** | 12.34 ms | **0.0075** | **Sub-10ms Streaming 🚀** |
+| | ONNX Dynamic INT8 | 1 Core | 37.89 ms | 43.87 ms | 0.0296 | Real-Time ✅ |
+| | ONNX Dynamic INT8 | 4 Cores | **21.15 ms** | 23.70 ms | **0.0165** | Real-Time ✅ |
+
+> **Temuan Kunci untuk Robot Sosial:**
+> 1. Pada potongan streaming live audio berdurasi 1.28 detik, inferensi CPU hanya membutuhkan **9.62 ms** ($\text{RTF} = 0.0075$). Ini berarti sistem anti-spoofing hanya mengonsumsi kurang dari 1% siklus prosesor CPU, memungkinkan deteksi deepfake secara simultan tanpa mengganggu interaksi percakapan natural atau streaming telepon.
+> 2. Model INT8 berhasil menekan ukuran biner menjadi **576 KB** dengan delta skor dari FP32 hanya $\Delta = 0.4459$, sangat ideal untuk microcontroller atau embedded Linux pada robot sosial.
