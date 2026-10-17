@@ -392,13 +392,13 @@ c9 = nbf.v4.new_code_cell(
     "\n"
     "atk_df = pd.DataFrame(attack_breakdown)\n"
     "atk_df.to_csv('eval_attack_breakdown.csv', index=False)\n"
-    "print('\n📊 Rincian Performa per Serangan (Unseen A07-A19):')\n"
+    "print('\\n📊 Rincian Performa per Serangan (Unseen A07-A19):')\n"
     "print(atk_df.to_string(index=False))"
 )
 
 # Cell 10: INT8 Quantization Degradation on Sample Subset
 c10 = nbf.v4.new_code_cell(
-    "print('\n' + '=' * 70)\n"
+    "print('\\n' + '=' * 70)\n"
     "print('⚡ EVALUASI DEGRADASI KUANTISASI (FP32 vs INT8 ONNX)')\n"
     "print('=' * 70)\n"
     "\n"
@@ -445,7 +445,7 @@ c10 = nbf.v4.new_code_cell(
     "    'Model Size INT8': '0.56 MB',\n"
     "}])\n"
     "final_summary.to_csv('asvspoof2019_final_eval_results.csv', index=False)\n"
-    "print('\n✅ File asvspoof2019_final_eval_results.csv dan eval_attack_breakdown.csv tersimpan!')"
+    "print('\\n✅ File asvspoof2019_final_eval_results.csv dan eval_attack_breakdown.csv tersimpan!')"
 )
 
 nb.cells = [c1, c2, c3, c4, c5, c6, c7, c8, c9, c10]
