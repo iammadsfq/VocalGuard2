@@ -416,7 +416,7 @@ c10 = nbf.v4.new_code_cell(
     "\n"
     "for idx in tqdm(indices, desc='CPU INT8 vs FP32 Parity'):\n"
     "    feat, label, _, _ = dev_dataset[idx]\n"
-    "    feat_np = feat.numpy()  # (1, 60, 399)\n"
+    "    feat_np = feat.unsqueeze(0).numpy()  # (1, 1, 60, 399)\n"
     "    out_fp32 = sess_fp32.run(None, {in_name_fp32: feat_np})[0]\n"
     "    out_int8 = sess_int8.run(None, {in_name_int8: feat_np})[0]\n"
     "    score_fp32 = out_fp32[0, 0] - out_fp32[0, 1]\n"

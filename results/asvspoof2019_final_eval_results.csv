@@ -1,0 +1,2 @@
+Model,Dev EER (%),Dev Threshold,Eval EER (%),Eval Threshold,Model Size FP32,Model Size INT8
+M1 LCNN (FP32),0.37,-1.1896,4.59,7.9534,2.08 MB,0.56 MB

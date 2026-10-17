@@ -69,22 +69,45 @@ Diimplementasikan pada [`vocal_guard/models/lcnn.py`](file:///home/saf/saf/proje
 
 ### 4.1 Tabel Perbandingan Performa Model (ASVspoof 2019 LA)
 
-| Kode | Konfigurasi Model | Fitur & Window | Parameter | Ukuran File | Dev EER (%) *(In-Dist A01–A06)* | Eval EER (%) *(Unseen A07–A19)* | Interpretasi Ilmiah |
+| Kode | Konfigurasi Model | Fitur & Window | Parameter | Ukuran File | Dev EER (%) *(In-Dist A01–A06)* | **Eval EER (%) *(Unseen A07–A19)*** | Interpretasi Ilmiah |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Awal** | MobileNetV2 (Frozen ImageNet + GAP) | LFCC Resize `224x224`, 1s | ~3.50 M | ~14.0 MB | `41.22%` | — | Gagal (mendekati tebakan acak) |
 | **B0** | **LFCC-GMM** (256 diag, custom LFCC) | LFCC `(T, 60)`, Full | Statistik | `0.97 MB` | `32.18%` | — | Di atas acak (pipeline label tidak rusak, namun belum setara GMM resmi ~8–9%) |
-| **M1** | **LCNN + MFM (FP32)** | LFCC `(1, 60, 399)`, 4s | **539,714** | `2.08 MB` | `0.37%` | *Sedang berjalan* ⏳ | Sangat kuat pada A01–A06; train acc 100% mengindikasikan potensi *overfitting* terhadap serangan train/dev |
-| **M1-Q** | **LCNN + MFM (ONNX Dynamic INT8)** | LFCC `(1, 60, 399)`, 4s | **539,714** | **`0.56 MB`** | *Menunggu subset* ⏳ | *Menunggu* ⏳ | Kompresi memori 73.0%; paritas EER sedang dihitung di Kaggle |
-| **M3** | **LCNN + GAP (Ablation H2)** | LFCC `(1, 60, 399)`, 4s | 314,434 | `1.20 MB` | *Siap dijalankan* ⏳ | — | Mengukur penalti akurasi akibat penggantian MFM Pool `3x4` dengan GAP `1x1` |
-| **M2** | **MobileNetV2 From-Scratch (Ablation H1)** | LFCC `(1, 60, 399)`, 4s | 2,225,858 | `8.50 MB` | *Siap dijalankan* ⏳ | — | Mengukur efek backbone MobileNetV2 jika dilatih dari nol pada LFCC |
-| **M1-Trim** | **LCNN + MFM + VAD Trim (Ablation H6)** | LFCC `(1, 60, 399)`, 4s Trimmed | 539,714 | `2.08 MB` | *Siap dijalankan* ⏳ | — | Mengukur performa murni tanpa *silence shortcut* (Müller dkk., 2021) |
-| **M1-1.28s**| **LCNN + MFM (Evaluasi Chunk 1.28s)** | LFCC `(1, 60, 128)`, 1.28s | 539,714 | `2.08 MB` | *Siap dijalankan* ⏳ | — | Mengukur EER riil pada potongan 1.28s untuk mendampingi klaim latensi chunk |
+| **M1** | **LCNN + MFM (FP32)** | LFCC `(1, 60, 399)`, 4s | **539,714** | `2.08 MB` | `0.37%` | **`4.59%`** 🏆 | **Angka Headline:** Sangat kuat di A07–A16 & A18–A19 ($\le 1.85\%$), terdegradasi pada serangan akustik VC **A17 (`25.73%`)** |
+| **M1-Q** | **LCNN + MFM (ONNX Dynamic INT8)** | LFCC `(1, 60, 399)`, 4s | **539,714** | **`0.56 MB`** | *Sedang berjalan (v8)* ⏳ | — | Kompresi memori 73.0%; paritas EER 2,000 sampel sedang berjalan di Kernel v8 |
+| **M3** | **LCNN + GAP (Ablation H2)** | LFCC `(1, 60, 399)`, 4s | 314,434 | `1.20 MB` | *Sedang berjalan (v8)* ⏳ | — | Mengukur penalti akurasi akibat penggantian MFM Pool `3x4` dengan GAP `1x1` |
+| **M2** | **MobileNetV2 From-Scratch (Ablation H1)** | LFCC `(1, 60, 399)`, 4s | 2,225,858 | `8.50 MB` | *Sedang berjalan (v8)* ⏳ | — | Mengukur efek backbone MobileNetV2 jika dilatih dari nol pada LFCC |
+| **M1-Trim** | **LCNN + MFM + VAD Trim (Ablation H6)** | LFCC `(1, 60, 399)`, 4s Trimmed | 539,714 | `2.08 MB` | *Sedang berjalan (v8)* ⏳ | — | Mengukur performa murni tanpa *silence shortcut* (Müller dkk., 2021) |
+| **M1-1.28s**| **LCNN + MFM (Evaluasi Chunk 1.28s)** | LFCC `(1, 60, 128)`, 1.28s | 539,714 | `2.08 MB` | *Sedang berjalan (v8)* ⏳ | — | Mengukur EER riil pada potongan 1.28s untuk mendampingi klaim latensi chunk |
 
-> **Catatan Kritis tentang Baseline B0 (`32.18%`) vs Literatur Resmi (~`8–9%`):**
-> Baseline LFCC-GMM resmi ASVspoof 2019 menggunakan *MATLAB reference front-end* dengan konfigurasi frekuensi penuh, *cepstral mean and variance normalization* (CMVN), serta pelatihan EM 512 komponen pada seluruh frame. Implementasi B0 kita menggunakan subset 200,000 frame dengan 256 komponen tanpa CMVN, sehingga hanya berfungsi sebagai **uji kewarasan (*sanity check*) bahwa pipeline pembacaan label dan ekstraksi fitur berada di atas tebakan acak**, bukan sebagai replikasi presisi baseline GMM kompetisi.
+---
 
-> **Catatan Kritis tentang Konvergensi M1 (`Train Acc 100%`, `Dev EER 0.37%`):**
-> Pada epoch ke-9 dan ke-10 ([`results/lcnn_training_history.csv`](file:///home/saf/saf/projects/Vocal-Guard/results/lcnn_training_history.csv)), akurasi training mencapai `100.0%` dengan *training loss* `0.0001`. Karena Dev Set menggunakan algoritma serangan yang sama dengan Train Set (A01–A06), angka `0.37%` mencerminkan performa *in-distribution*. Evaluasi pada **Eval Set (A07–A19)** yang sedang berjalan di Kaggle akan mengungkap seberapa jauh model mengalami *overfitting* pada artefak spesifik A01–A06 (khususnya terhadap serangan sulit seperti A17/A18).
+### 4.2 Rincian Performa Generalisasi pada Unseen Eval Set (71,237 Utterance: A07–A19)
+Sumber data: [`results/eval_attack_breakdown.csv`](file:///home/saf/saf/projects/Vocal-Guard/results/eval_attack_breakdown.csv) & [`results/asvspoof2019_final_eval_results.csv`](file:///home/saf/saf/projects/Vocal-Guard/results/asvspoof2019_final_eval_results.csv)
+
+* **Pooled Eval EER (Seluruh 71,237 sampel):** **`4.59%`** (Threshold optimal Eval: `+7.9534` vs Threshold Dev: `-1.1896`).
+* Berikut adalah rincian EER untuk masing-masing dari 13 algoritma serangan tak dikenal (*unseen attacks*) dibandingkan terhadap 7,355 sampel *bonafide* Eval:
+
+| Attack ID | Kategori Serangan (ASVspoof 2019 LA) | Jumlah Sampel | EER per Serangan (%) | Rata-rata Skor Logit | Analisis & Interpretasi |
+| :---: | :--- | :---: | :---: | :---: | :--- |
+| **A07** | TTS (Neural Vocoder / WaveNet) | 4,914 | `0.48%` | `-15.0977` | Terdeteksi sangat baik |
+| **A08** | TTS (Neural Waveform) | 4,914 | `0.09%` | `-30.9816` | Terdeteksi hampir sempurna |
+| **A09** | TTS (Vocoder Tradisional) | 4,914 | **`0.00%`** | `-46.3613` | Terdeteksi sempurna |
+| **A10** | TTS (End-to-End Neural TTS) | 4,914 | `1.48%` | `-7.6414` | Generalisasi baik |
+| **A11** | TTS (Neural / Griffin-Lim) | 4,914 | `0.55%` | `-15.1364` | Terdeteksi sangat baik |
+| **A12** | TTS (Neural WaveNet) | 4,914 | `1.39%` | `-13.2628` | Generalisasi baik |
+| **A13** | VC + TTS Combined | 4,914 | `1.85%` | `-6.0059` | Generalisasi baik |
+| **A14** | VC + Vocoder | 4,914 | `0.71%` | `-14.0749` | Terdeteksi sangat baik |
+| **A15** | VC + Neural Waveform | 4,914 | `1.14%` | `-10.5323` | Generalisasi baik |
+| **A16** | TTS (Known-type Waveform Concatenation) | 4,914 | `0.59%` | `-16.7935` | Terdeteksi sangat baik |
+| **A17** | **VC (Waveform Filtering / Direct Acoustic VC)** | **4,914** | **`25.73%`** ⚠️ | **`+9.2221`** | **Titik Lemah Utama:** Skor positif menyerupai *bonafide* |
+| **A18** | VC (Non-parallel / i-vector + Vocoder) | 4,914 | `1.85%` | `-8.3047` | Generalisasi baik |
+| **A19** | VC (Spectral Mapping) | 4,914 | `1.30%` | `-16.4945` | Generalisasi baik |
+
+> **Analisis Ilmiah Dev (`0.37%`) vs Eval (`4.59%`) dan Anomali A17 (`25.73%`):**
+> 1. **Kesenjangan In-Distribution vs Out-of-Distribution:** Kenaikan EER dari `0.37%` (Dev) menjadi `4.59%` (Eval) serta pergeseran ambang batas optimal dari `-1.19` ke `+7.95` membuktikan bahwa metrik Dev tidak boleh dijadikan klaim tunggal.
+> 2. **Mengapa A17 Gagal (`25.73%` EER, Mean Score `+9.22`)?** Pada literatur resmi ASVspoof 2019 (Nautiyal dkk. / Todisco dkk., 2019), **A17** adalah serangan *Voice Conversion* berbasis penyaringan gelombang langsung (*direct waveform filtering*) yang mempertahankan eksitasi fase asli pembicara sumber tanpa melewati *vocoder* sintetis konvensional. Karena model LCNN kita belajar mendeteksi artefak frekuensi tinggi dari *vocoder* (yang sangat jelas pada A07–A16 dan A18–A19 di mana EER $\le 1.85\%$), sampel A17 berhasil mengelabui model dan memperoleh skor rata-rata positif (`+9.2221`). Tanpa A17, rata-rata EER pada 12 serangan tak dikenal lainnya berada di bawah **`1.0%`**. Temuan ini menjadi bukti empiris yang sangat kaya untuk diskusi esai Q03 dan Q05.
+
 
 ---
 

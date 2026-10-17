@@ -10,16 +10,19 @@ Evaluasi ulang secara sistematis dan *re-engineering* sistem deteksi spoofing su
 
 *Catatan Penting:* Pada ASVspoof 2019 LA, **Dev Set** memuat jenis serangan yang sama dengan Train Set (A01–A06, *in-distribution*), sedangkan **Eval Set** memuat 13 jenis serangan baru yang belum pernah dilihat saat pelatihan (A07–A19, *out-of-distribution*). Angka **Eval EER** menjadi tolok ukur utama (*headline*) generalisasi sistem.
 
-| Kode | Konfigurasi Model | Fitur & Panjang Input | Parameter | Ukuran File | Dev EER (%) *(In-Dist A01–A06)* | Eval EER (%) *(Unseen A07–A19)* | Interpretasi & Status |
+| Kode | Konfigurasi Model | Fitur & Panjang Input | Parameter | Ukuran File | Dev EER (%) *(In-Dist A01–A06)* | **Eval EER (%) *(Unseen A07–A19)*** | Interpretasi & Status |
 | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :--- |
 | **Awal** | MobileNetV2 (Frozen ImageNet + GAP) | LFCC Resize `224x224`, 1s | ~3.50 M | ~14.0 MB | `41.22%` | — | Gagal (mendekati tebakan acak) |
 | **B0** | **LFCC-GMM** (256 diag, custom LFCC) | LFCC `(T, 60)`, Full | Statistik | `0.97 MB` | `32.18%` | — | Di atas acak (pipeline data/label tidak rusak, belum setara GMM resmi ~8–9%) |
-| **M1** | **LCNN + MFM (FP32)** | LFCC `(1, 60, 399)`, 4s | **539,714** | `2.08 MB` | `0.37%` | *Sedang berjalan* ⏳ | Kuat pada A01–A06; sedang diuji generalisasinya di Eval Set |
-| **M1-Q** | **LCNN + MFM (ONNX Dynamic INT8)** | LFCC `(1, 60, 399)`, 4s | **539,714** | **`0.56 MB`** | *Menunggu subset* ⏳ | *Menunggu* ⏳ | Kompresi ukuran file 73.0%; paritas EER sedang dihitung |
-| **M3** | **LCNN + GAP (Ablation H2)** | LFCC `(1, 60, 399)`, 4s | 314,434 | `1.20 MB` | *Siap dijalankan* ⏳ | — | Mengisolasi efek *Global Average Pooling* (H2) |
-| **M2** | **MobileNetV2 From-Scratch (Ablation H1)** | LFCC `(1, 60, 399)`, 4s | 2,225,858 | `8.50 MB` | *Siap dijalankan* ⏳ | — | Mengisolasi efek arsitektur backbone (H1) |
-| **M1-Trim** | **LCNN + MFM + VAD Trim (Ablation H6)** | LFCC `(1, 60, 399)`, 4s Trimmed | 539,714 | `2.08 MB` | *Siap dijalankan* ⏳ | — | Mengisolasi efek *silence shortcut* (Müller dkk., 2021) |
-| **M1-1.28s**| **LCNN + MFM (Evaluasi Chunk 1.28s)** | LFCC `(1, 60, 128)`, 1.28s | 539,714 | `2.08 MB` | *Siap dijalankan* ⏳ | — | Mengukur EER riil pada potongan pendek 1.28 detik |
+| **M1** | **LCNN + MFM (FP32)** | LFCC `(1, 60, 399)`, 4s | **539,714** | `2.08 MB` | `0.37%` | **`4.59%`** 🏆 | **Angka Headline:** Sangat kuat di A07–A16 & A18–A19 ($\le 1.85\%$), terdegradasi pada VC **A17 (`25.73%`)** |
+| **M1-Q** | **LCNN + MFM (ONNX Dynamic INT8)** | LFCC `(1, 60, 399)`, 4s | **539,714** | **`0.56 MB`** | *Sedang berjalan (v8)* ⏳ | — | Kompresi ukuran file 73.0%; paritas EER sedang berjalan di Kernel v8 |
+| **M3** | **LCNN + GAP (Ablation H2)** | LFCC `(1, 60, 399)`, 4s | 314,434 | `1.20 MB` | *Sedang berjalan (v8)* ⏳ | — | Mengisolasi efek *Global Average Pooling* (H2) |
+| **M2** | **MobileNetV2 From-Scratch (Ablation H1)** | LFCC `(1, 60, 399)`, 4s | 2,225,858 | `8.50 MB` | *Sedang berjalan (v8)* ⏳ | — | Mengisolasi efek arsitektur backbone (H1) |
+| **M1-Trim** | **LCNN + MFM + VAD Trim (Ablation H6)** | LFCC `(1, 60, 399)`, 4s Trimmed | 539,714 | `2.08 MB` | *Sedang berjalan (v8)* ⏳ | — | Mengisolasi efek *silence shortcut* (Müller dkk., 2021) |
+| **M1-1.28s**| **LCNN + MFM (Evaluasi Chunk 1.28s)** | LFCC `(1, 60, 128)`, 1.28s | 539,714 | `2.08 MB` | *Sedang berjalan (v8)* ⏳ | — | Mengukur EER riil pada potongan pendek 1.28 detik |
+
+> **Temuan Generalisasi Eval Set (`4.59%` Pooled EER):** Pada 12 dari 13 jenis serangan tak dikenal (A07–A16, A18–A19), model mencapai EER antara **`0.00%` hingga `1.85%`**. Satu-satunya serangan yang mendegradasi performa secara signifikan adalah **A17 (`25.73%` EER)**, yaitu metode *Voice Conversion* berbasis *direct waveform filtering* yang mempertahankan eksitasi fase asli tanpa melalui *vocoder* konvensional (lihat rincian lengkap di [`results/eval_attack_breakdown.csv`](file:///home/saf/saf/projects/Vocal-Guard/results/eval_attack_breakdown.csv) dan [`RESEARCH_DOCUMENTATION.md`](file:///home/saf/saf/projects/Vocal-Guard/RESEARCH_DOCUMENTATION.md)).
+
 
 ---
 
