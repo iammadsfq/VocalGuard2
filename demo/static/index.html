@@ -1,0 +1,820 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vocal-Guard — Chunk Inference & Latency Proof-of-Concept</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #1e293b;
+      --panel-alt: #0b1120;
+      --border: #334155;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-hover: #0284c7;
+      --positive: #34d399;
+      --negative: #fb7185;
+      --warn-bg: #422006;
+      --warn-border: #ca8a04;
+      --warn-text: #fef08a;
+      --font-mono: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.5;
+      padding: 20px;
+    }
+    .container {
+      max-width: 1240px;
+      margin: 0 auto;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      gap: 16px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 16px;
+      margin-bottom: 16px;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-top: 4px;
+    }
+    .badge-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .badge {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 0.78rem;
+      font-family: var(--font-mono);
+      color: var(--accent);
+    }
+    .disclaimer-box {
+      background: var(--warn-bg);
+      border: 1px solid var(--warn-border);
+      color: var(--warn-text);
+      padding: 12px 16px;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      margin-bottom: 20px;
+    }
+    .disclaimer-box strong {
+      display: block;
+      margin-bottom: 4px;
+      color: #fde047;
+    }
+    .disclaimer-box ul {
+      margin-left: 18px;
+    }
+    .controls-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    @media (max-width: 860px) {
+      .controls-grid { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px;
+    }
+    .card-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: #e2e8f0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 8px 12px;
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.85rem;
+      transition: all 0.15s;
+    }
+    .tab-btn.active {
+      background: var(--accent);
+      color: #0f172a;
+      border-color: var(--accent);
+    }
+    .form-row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+    label {
+      font-size: 0.84rem;
+      color: var(--muted);
+    }
+    select, input[type="file"] {
+      background: var(--panel-alt);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 7px 10px;
+      border-radius: 6px;
+      font-size: 0.85rem;
+    }
+    .btn {
+      background: var(--accent);
+      color: #0f172a;
+      border: none;
+      padding: 8px 14px;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn:hover { background: var(--accent-hover); color: #fff; }
+    .btn-secondary {
+      background: var(--panel-alt);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover { background: #334155; }
+    .btn-danger {
+      background: var(--negative);
+      color: #0f172a;
+    }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    @media (max-width: 780px) {
+      .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    .kpi-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+    .kpi-label {
+      font-size: 0.76rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .kpi-val {
+      font-size: 1.4rem;
+      font-weight: 700;
+      font-family: var(--font-mono);
+      margin-top: 4px;
+      color: var(--accent);
+    }
+    .kpi-sub {
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+    .charts-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+    @media (max-width: 860px) {
+      .charts-grid { grid-template-columns: 1fr; }
+    }
+    canvas {
+      width: 100%;
+      height: 220px;
+      background: var(--panel-alt);
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      display: block;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.83rem;
+      font-family: var(--font-mono);
+    }
+    th, td {
+      padding: 8px 10px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      background: var(--panel-alt);
+    }
+    .score-pos { color: var(--positive); font-weight: 600; }
+    .score-neg { color: var(--negative); font-weight: 600; }
+    .status-pill {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-family: var(--font-mono);
+      background: var(--panel-alt);
+      border: 1px solid var(--border);
+    }
+    .note-small {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Vocal-Guard — Per-Chunk CPU Inference & Latency Demo</h1>
+        <div class="subtitle">
+          Pipeline Proof-of-Concept: 60-dim LFCC (<code>vocal_guard/features.py</code>) &rarr; LCNN + MFM &rarr; ONNX Runtime CPU
+        </div>
+      </div>
+      <div class="badge-row">
+        <span class="badge">Chunk: 1.28s (20,480 samp @ 16kHz &rarr; 128 frames)</span>
+        <span class="badge">FP32: 2.08 MB | INT8: 0.56 MB (-73%)</span>
+      </div>
+    </header>
+
+    <!-- Panel Batasan Klaim (Wajib selalu terlihat sesuai PRD Bagian 3 & 7) -->
+    <div class="disclaimer-box">
+      <strong>⚠️ Batasan Klaim Ilmiah & Metodologi (Harap Dibaca):</strong>
+      <ul>
+        <li><strong>Bukan Vonis Deepfake Dunia Nyata:</strong> Demo ini adalah <em>proof-of-concept</em> untuk memvalidasi eksekusi pipeline dan mengukur latensi inferensi CPU per potongan (<em>chunk</em>) 1.28 detik serta <em>Real-Time Factor</em> (RTF).</li>
+        <li><strong>Skor Mentah (Tanpa Label REAL/FAKE):</strong> Skor ditampilkan sebagai selisih logit mentah $s = \text{logit}_{\text{bonafide}} - \text{logit}_{\text{spoof}}$ (nilai positif condong ke distribusi <em>bonafide</em> ASVspoof, nilai negatif condong ke distribusi <em>spoof</em>).</li>
+        <li><strong>Distribusi & Panjang Input:</strong> Model M1 dilatih pada rekaman bersih ASVspoof 2019 LA berdurasi 4.0 detik (399 frame). Evaluasi pada chunk 1.28 detik (128 frame) dan input mikrofon langsung berada di luar protokol pelatihan standar (<em>out-of-domain</em>).</li>
+        <li><strong>Temuan Jujur FP32 vs INT8 di CPU Non-VNNI:</strong> Model <code>ONNX FP32</code> dijadikan default karena dieksekusi langsung dengan instruksi vektor AVX2 FMA (~9–15 ms), sedangkan <code>ONNX Dynamic INT8</code> (meskipun ukurannya 73% lebih kecil: 576 KB) memerlukan komputasi <em>dynamic quantization/dequantization</em> per layer yang lebih lambat (~35–45 ms) pada CPU laptop tanpa instruksi AVX-512 VNNI.</li>
+      </ul>
+    </div>
+
+    <div class="controls-grid">
+      <!-- Panel Kontrol Mode -->
+      <div class="card">
+        <div class="card-title">
+          <span>1. Pilih Mode Input & Konfigurasi Model</span>
+          <span id="statusIndicator" class="status-pill">Siap (Idle)</span>
+        </div>
+
+        <div class="tabs">
+          <button id="tabUpload" class="tab-btn active" onclick="switchMode('upload')">
+            📁 Mode Upload / Sampel Referensi (Utama - P0)
+          </button>
+          <button id="tabMic" class="tab-btn" onclick="switchMode('mic')">
+            🎙️ Mode Mikrofon Live WebSocket (Eksperimental - P1)
+          </button>
+        </div>
+
+        <div class="form-row">
+          <label for="modelSelect">Model ONNX:</label>
+          <select id="modelSelect">
+            <option value="fp32" selected>ONNX FP32 (2.08 MB — Default, Tercepat di CPU AVX2)</option>
+            <option value="int8">ONNX Dynamic INT8 (0.56 MB — Kompresi 73%, Tanpa VNNI)</option>
+          </select>
+
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
+            <input type="checkbox" id="compareBothToggle" checked />
+            Bandingkan Sisi-ke-Sisi FP32 vs INT8 (P2)
+          </label>
+        </div>
+
+        <!-- Konten Mode Upload -->
+        <div id="uploadSection">
+          <div class="form-row">
+            <input type="file" id="audioFileInput" accept=".wav,.flac,.ogg,.mp3" />
+            <button class="btn" onclick="analyzeUploadedFile()">Proses File Per-Chunk</button>
+          </div>
+          <div class="form-row">
+            <span style="font-size:0.82rem; color:var(--muted);">Atau uji sampel referensi lokal:</span>
+            <button class="btn btn-secondary" onclick="runBuiltinSample('reference_harmonic_5s.wav')">
+              ▶️ Sampel Harmonik (5.12s / 4 Chunks)
+            </button>
+            <button class="btn btn-secondary" onclick="runBuiltinSample('reference_synthetic_artifact_5s.wav')">
+              ▶️ Sampel Artefak Frekuensi Tinggi (5.12s / 4 Chunks)
+            </button>
+          </div>
+          <audio id="audioPreview" controls style="width:100%; height:36px; margin-top:6px; display:none;"></audio>
+        </div>
+
+        <!-- Konten Mode Mikrofon -->
+        <div id="micSection" style="display:none;">
+          <div class="form-row">
+            <button id="btnStartMic" class="btn" onclick="startMicStreaming()">🔴 Mulai Streaming Mikrofon (1.28s / Chunk)</button>
+            <button id="btnStopMic" class="btn btn-danger" onclick="stopMicStreaming()" disabled>⏹️ Hentikan</button>
+          </div>
+          <div class="note-small">
+            <em>Catatan Eksperimental:</em> Audio mikrofon ditangkap lewat Web Audio API, di-downsample ke 16 kHz mono, dan dikirim setiap 20.480 sampel (1,28 detik) melalui WebSocket ke backend FastAPI. Karena mikrofon laptop dan akustik ruangan berbeda dari korpus ASVspoof 2019 LA, fokuskan pengamatan pada <strong>konsistensi latensi (ms) dan RTF</strong>.
+          </div>
+        </div>
+      </div>
+
+      <!-- Panel Penjelasan Skor & Ekspor -->
+      <div class="card">
+        <div class="card-title">
+          <span>2. Interpretasi Metrik & Ekspor Sesi</span>
+          <button class="btn btn-secondary" onclick="exportSessionCSV()">⬇️ Ekspor CSV (P2)</button>
+        </div>
+        <p style="font-size:0.84rem; color:var(--muted); margin-bottom:10px;">
+          Setiap potongan audio berdurasi <strong>1.28 detik</strong> diekstrak menjadi matriks <strong>LFCC (60 &times; 128)</strong> menggunakan fungsi Python yang identik dengan saat pelatihan:
+        </p>
+        <div style="background:var(--panel-alt); padding:10px 12px; border-radius:6px; border:1px solid var(--border); font-family:var(--font-mono); font-size:0.8rem; margin-bottom:10px;">
+          <div>Skor Mentah = logit_bonafide &minus; logit_spoof</div>
+          <div style="color:var(--positive); margin-top:4px;">&bull; Skor &gt; 0 : Condong ke pola spektral bonafide ASVspoof</div>
+          <div style="color:var(--negative);">&bull; Skor &lt; 0 : Condong ke pola artefak spoof ASVspoof</div>
+          <div style="color:var(--accent); margin-top:4px;">&bull; RTF = (Waktu Proses Detik) / 1.28 detik (Target &ll; 1.0)</div>
+        </div>
+        <div id="comparisonSummaryBox" style="display:none; background:var(--panel-alt); padding:10px 12px; border-radius:6px; border:1px solid var(--border); font-size:0.8rem;">
+        </div>
+      </div>
+    </div>
+
+    <!-- Kartu Ringkasan KPI (P0) -->
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Rata-rata Latensi ONNX</div>
+        <div class="kpi-val" id="kpiMeanInf">— ms</div>
+        <div class="kpi-sub" id="kpiSubInf">Total (+LFCC): — ms</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">p95 Latensi Inferensi</div>
+        <div class="kpi-val" id="kpiP95Inf">— ms</div>
+        <div class="kpi-sub" id="kpiSubP95">p95 Total (+LFCC): — ms</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Real-Time Factor (RTF)</div>
+        <div class="kpi-val" id="kpiRTF">—</div>
+        <div class="kpi-sub" id="kpiSpeedup">Target Real-Time: &lt; 1.0000</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Jumlah Chunk & Rata-rata Skor</div>
+        <div class="kpi-val" id="kpiChunks">0 Chunks</div>
+        <div class="kpi-sub" id="kpiMeanScore">Mean Raw Score: —</div>
+      </div>
+    </div>
+
+    <!-- Grafik Garis Real-Time (P1) -->
+    <div class="charts-grid">
+      <div class="card">
+        <div class="card-title">
+          <span>📈 Grafik Skor Mentah per Chunk ($s = \text{logit}_{\text{bona}} - \text{logit}_{\text{spoof}}$)</span>
+          <span class="note-small">Garis putus-putus = 0.0</span>
+        </div>
+        <canvas id="scoreChart" width="560" height="220"></canvas>
+      </div>
+      <div class="card">
+        <div class="card-title">
+          <span>⚡ Grafik Latensi CPU per Chunk (ms) — Durasi Chunk: 1,280 ms</span>
+          <span class="note-small">Biru: ONNX Inferensi | Hijau: Ekstraksi LFCC</span>
+        </div>
+        <canvas id="latencyChart" width="560" height="220"></canvas>
+      </div>
+    </div>
+
+    <!-- Tabel Rincian Per Chunk (P0) -->
+    <div class="card">
+      <div class="card-title">
+        <span>📋 Log Rincian Eksekusi Per Chunk (1.28 Detik / Chunk)</span>
+        <span id="tableMeta" class="note-small">Belum ada data</span>
+      </div>
+      <div style="overflow-x:auto;">
+        <table>
+          <thead>
+            <tr>
+              <th>Chunk #</th>
+              <th>Rentang Waktu</th>
+              <th>Model</th>
+              <th>Skor Mentah (Logit Diff)</th>
+              <th>Logit [Bonafide, Spoof]</th>
+              <th>LFCC (ms)</th>
+              <th>ONNX Infer (ms)</th>
+              <th>Total (ms)</th>
+              <th>RTF Total</th>
+              <th id="thCompare">Perbandingan (FP32 vs INT8)</th>
+            </tr>
+          </thead>
+          <tbody id="chunkTableBody">
+            <tr>
+              <td colspan="10" style="text-align:center; color:var(--muted); padding:20px;">
+                Pilih sampel referensi atau unggah file audio WAV/FLAC untuk memulai evaluasi per-chunk.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentMode = 'upload';
+    let sessionChunks = [];
+    let comparisonChunks = [];
+    let ws = null;
+    let audioCtx = null;
+    let mediaStream = null;
+    let processorNode = null;
+    let pcmBuffer = [];
+    const CHUNK_SAMPLES = 20480; // 1.28s @ 16kHz
+
+    function setStatus(text, color = '#38bdf8') {
+      const el = document.getElementById('statusIndicator');
+      el.textContent = text;
+      el.style.borderColor = color;
+      el.style.color = color;
+    }
+
+    function switchMode(mode) {
+      currentMode = mode;
+      document.getElementById('tabUpload').classList.toggle('active', mode === 'upload');
+      document.getElementById('tabMic').classList.toggle('active', mode === 'mic');
+      document.getElementById('uploadSection').style.display = mode === 'upload' ? 'block' : 'none';
+      document.getElementById('micSection').style.display = mode === 'mic' ? 'block' : 'none';
+      if (mode === 'upload' && ws) {
+        stopMicStreaming();
+      }
+    }
+
+    async function runBuiltinSample(filename) {
+      try {
+        setStatus(`Mengambil sampel ${filename}...`, '#fbbf24');
+        const resp = await fetch(`/api/samples/${filename}`);
+        if (!resp.ok) throw new Error('Gagal mengunduh sampel referensi');
+        const blob = await resp.blob();
+        const file = new File([blob], filename, { type: 'audio/wav' });
+
+        const audioEl = document.getElementById('audioPreview');
+        audioEl.src = URL.createObjectURL(blob);
+        audioEl.style.display = 'block';
+
+        await submitFileForAnalysis(file);
+      } catch (err) {
+        setStatus(`Error: ${err.message}`, '#fb7185');
+      }
+    }
+
+    async function analyzeUploadedFile() {
+      const input = document.getElementById('audioFileInput');
+      if (!input.files || input.files.length === 0) {
+        alert('Silakan pilih file audio (.wav / .flac) terlebih dahulu.');
+        return;
+      }
+      const file = input.files[0];
+      const audioEl = document.getElementById('audioPreview');
+      audioEl.src = URL.createObjectURL(file);
+      audioEl.style.display = 'block';
+      await submitFileForAnalysis(file);
+    }
+
+    async function submitFileForAnalysis(file) {
+      const modelType = document.getElementById('modelSelect').value;
+      const compareBoth = document.getElementById('compareBothToggle').checked;
+
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('model_type', modelType);
+      formData.append('compare_both', compareBoth ? 'true' : 'false');
+
+      setStatus('Memproses chunk di CPU...', '#fbbf24');
+      try {
+        const resp = await fetch('/api/analyze-file', {
+          method: 'POST',
+          body: formData
+        });
+        if (!resp.ok) {
+          const errData = await resp.json();
+          throw new Error(errData.detail || 'Gagal memproses audio');
+        }
+        const data = await resp.json();
+        sessionChunks = data.primary.chunks || [];
+        comparisonChunks = (data.comparison && data.comparison.chunks) ? data.comparison.chunks : [];
+
+        updateKPIs(data.primary.summary);
+        updateComparisonBox(data.primary.summary, data.comparison);
+        renderTable(sessionChunks, comparisonChunks);
+        drawCharts(sessionChunks, comparisonChunks);
+        document.getElementById('tableMeta').textContent =
+          `File: ${data.filename} (${data.duration_sec}s @ 16kHz)`;
+        setStatus('Selesai (Ready)', '#34d399');
+      } catch (err) {
+        setStatus(`Error: ${err.message}`, '#fb7185');
+      }
+    }
+
+    function updateKPIs(summary) {
+      if (!summary || !summary.num_chunks) return;
+      document.getElementById('kpiMeanInf').textContent = `${summary.mean_inference_ms.toFixed(2)} ms`;
+      document.getElementById('kpiSubInf').textContent = `Total (+LFCC): ${summary.mean_total_ms.toFixed(2)} ms`;
+      document.getElementById('kpiP95Inf').textContent = `${summary.p95_inference_ms.toFixed(2)} ms`;
+      document.getElementById('kpiSubP95').textContent = `p95 Total (+LFCC): ${summary.p95_total_ms.toFixed(2)} ms`;
+      document.getElementById('kpiRTF').textContent = summary.mean_rtf.toFixed(4);
+      const speedup = summary.mean_rtf > 0 ? (1.0 / summary.mean_rtf).toFixed(0) : '—';
+      document.getElementById('kpiSpeedup').textContent = `~${speedup}x lebih cepat dari real-time`;
+      document.getElementById('kpiChunks').textContent = `${summary.num_chunks} Chunks (${summary.model_type})`;
+      document.getElementById('kpiMeanScore').textContent = `Mean Raw Score: ${summary.mean_raw_score > 0 ? '+' : ''}${summary.mean_raw_score.toFixed(4)}`;
+    }
+
+    function updateComparisonBox(primarySum, compData) {
+      const box = document.getElementById('comparisonSummaryBox');
+      if (!compData || !compData.summary) {
+        box.style.display = 'none';
+        return;
+      }
+      const s2 = compData.summary;
+      box.style.display = 'block';
+      box.innerHTML = `
+        <strong style="color:var(--accent);">🔬 Perbandingan Langsung ${primarySum.model_type} (${primarySum.model_size_mb} MB) vs ${s2.model_type} (${s2.model_size_mb} MB):</strong>
+        <div style="margin-top:4px; font-family:var(--font-mono);">
+          &bull; Latensi ONNX Rata-rata: <strong>${primarySum.model_type} = ${primarySum.mean_inference_ms} ms</strong> vs <strong>${s2.model_type} = ${s2.mean_inference_ms} ms</strong><br/>
+          &bull; Selisih Skor Absolut Rata-rata (|FP32 &minus; INT8|): <strong>${compData.mean_abs_score_diff}</strong> (Maks: ${compData.max_abs_score_diff})
+        </div>
+      `;
+    }
+
+    function renderTable(chunks, compChunks) {
+      const tbody = document.getElementById('chunkTableBody');
+      tbody.innerHTML = '';
+      chunks.forEach((c, idx) => {
+        const tr = document.createElement('tr');
+        const scoreCls = c.raw_score >= 0 ? 'score-pos' : 'score-neg';
+        const scoreSign = c.raw_score >= 0 ? '+' : '';
+        const startSec = c.start_sec !== undefined ? c.start_sec.toFixed(2) : ((c.chunk_index - 1) * 1.28).toFixed(2);
+        const endSec = c.end_sec !== undefined ? c.end_sec.toFixed(2) : (c.chunk_index * 1.28).toFixed(2);
+
+        let compCell = '—';
+        if (compChunks && compChunks[idx]) {
+          const cc = compChunks[idx];
+          const diff = Math.abs(c.raw_score - cc.raw_score).toFixed(4);
+          compCell = `${cc.model_type}: ${cc.inference_ms.toFixed(2)} ms | Skor: ${cc.raw_score >= 0 ? '+' : ''}${cc.raw_score.toFixed(2)} (|Δ|=${diff})`;
+        }
+
+        tr.innerHTML = `
+          <td>#${c.chunk_index}</td>
+          <td>${startSec}s – ${endSec}s</td>
+          <td>${c.model_type}</td>
+          <td class="${scoreCls}">${scoreSign}${c.raw_score.toFixed(4)}</td>
+          <td>[${c.logit_bonafide.toFixed(2)}, ${c.logit_spoof.toFixed(2)}]</td>
+          <td>${c.feature_ms.toFixed(2)}</td>
+          <td><strong>${c.inference_ms.toFixed(2)}</strong></td>
+          <td>${c.total_ms.toFixed(2)}</td>
+          <td>${c.rtf_total.toFixed(4)}</td>
+          <td style="color:var(--muted);">${compCell}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function drawCharts(chunks, compChunks) {
+      drawScoreChart(chunks, compChunks);
+      drawLatencyChart(chunks, compChunks);
+    }
+
+    function drawScoreChart(chunks, compChunks) {
+      const canvas = document.getElementById('scoreChart');
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width;
+      const H = canvas.height;
+      ctx.clearRect(0, 0, W, H);
+      if (!chunks || chunks.length === 0) return;
+
+      const padL = 48, padR = 20, padT = 20, padB = 30;
+      const plotW = W - padL - padR;
+      const plotH = H - padT - padB;
+
+      const scores = chunks.map(c => c.raw_score);
+      const minVal = Math.min(-5, ...scores) - 2;
+      const maxVal = Math.max(5, ...scores) + 2;
+
+      const yZero = padT + plotH * (maxVal / (maxVal - minVal));
+      // Zero reference line
+      ctx.strokeStyle = '#475569';
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(padL, yZero);
+      ctx.lineTo(W - padR, yZero);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '11px monospace';
+      ctx.fillText(maxVal.toFixed(1), 6, padT + 8);
+      ctx.fillText('0.0', 14, yZero + 4);
+      ctx.fillText(minVal.toFixed(1), 6, H - padB);
+
+      // Plot line
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      chunks.forEach((c, i) => {
+        const x = padL + (chunks.length === 1 ? plotW / 2 : (i / (chunks.length - 1)) * plotW);
+        const y = padT + plotH * ((maxVal - c.raw_score) / (maxVal - minVal));
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      // Points
+      chunks.forEach((c, i) => {
+        const x = padL + (chunks.length === 1 ? plotW / 2 : (i / (chunks.length - 1)) * plotW);
+        const y = padT + plotH * ((maxVal - c.raw_score) / (maxVal - minVal));
+        ctx.fillStyle = c.raw_score >= 0 ? '#34d399' : '#fb7185';
+        ctx.beginPath();
+        ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#94a3b8';
+        ctx.fillText(`#${c.chunk_index}`, x - 8, H - 10);
+      });
+    }
+
+    function drawLatencyChart(chunks, compChunks) {
+      const canvas = document.getElementById('latencyChart');
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width;
+      const H = canvas.height;
+      ctx.clearRect(0, 0, W, H);
+      if (!chunks || chunks.length === 0) return;
+
+      const padL = 48, padR = 20, padT = 20, padB = 30;
+      const plotW = W - padL - padR;
+      const plotH = H - padT - padB;
+
+      const allTotals = chunks.map(c => c.total_ms);
+      if (compChunks && compChunks.length) {
+        compChunks.forEach(c => allTotals.push(c.total_ms));
+      }
+      const maxLat = Math.max(25, ...allTotals) * 1.2;
+
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '11px monospace';
+      ctx.fillText(`${maxLat.toFixed(0)}ms`, 4, padT + 8);
+      ctx.fillText('0ms', 12, H - padB);
+
+      const barGroupW = plotW / chunks.length;
+      const barW = Math.min(36, barGroupW * 0.35);
+
+      chunks.forEach((c, i) => {
+        const groupX = padL + i * barGroupW + barGroupW * 0.2;
+        const infH = (c.inference_ms / maxLat) * plotH;
+        const featH = (c.feature_ms / maxLat) * plotH;
+
+        // ONNX Inference bar
+        ctx.fillStyle = '#38bdf8';
+        ctx.fillRect(groupX, H - padB - infH, barW, infH);
+
+        // LFCC Feature stacked bar
+        ctx.fillStyle = '#34d399';
+        ctx.fillRect(groupX, H - padB - infH - featH, barW, featH);
+
+        // Optional comparison bar (e.g. INT8)
+        if (compChunks && compChunks[i]) {
+          const cc = compChunks[i];
+          const compInfH = (cc.inference_ms / maxLat) * plotH;
+          ctx.fillStyle = '#f59e0b';
+          ctx.fillRect(groupX + barW + 4, H - padB - compInfH, barW, compInfH);
+        }
+
+        ctx.fillStyle = '#94a3b8';
+        ctx.fillText(`#${c.chunk_index}`, groupX, H - 10);
+      });
+    }
+
+    // Mode Mikrofon Live WebSocket (P1)
+    async function startMicStreaming() {
+      const modelType = document.getElementById('modelSelect').value;
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(`${proto}://${window.location.host}/ws/stream?model_type=${modelType}`);
+
+      sessionChunks = [];
+      comparisonChunks = [];
+      pcmBuffer = [];
+      document.getElementById('comparisonSummaryBox').style.display = 'none';
+
+      ws.onopen = async () => {
+        setStatus('Mikrofon Aktif (Streaming 1.28s chunks)...', '#34d399');
+        document.getElementById('btnStartMic').disabled = true;
+        document.getElementById('btnStopMic').disabled = false;
+
+        try {
+          mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+          const source = audioCtx.createMediaStreamSource(mediaStream);
+          processorNode = audioCtx.createScriptProcessor(4096, 1, 1);
+
+          processorNode.onaudioprocess = (e) => {
+            const inputData = e.inputBuffer.getChannelData(0);
+            const inSr = audioCtx.sampleRate;
+            // Simple decimation/resample if browser ignored 16kHz request
+            if (inSr === 16000) {
+              for (let i = 0; i < inputData.length; i++) pcmBuffer.push(inputData[i]);
+            } else {
+              const ratio = inSr / 16000;
+              const outLen = Math.floor(inputData.length / ratio);
+              for (let i = 0; i < outLen; i++) {
+                pcmBuffer.push(inputData[Math.floor(i * ratio)]);
+              }
+            }
+
+            while (pcmBuffer.length >= CHUNK_SAMPLES) {
+              const chunk = new Float32Array(pcmBuffer.splice(0, CHUNK_SAMPLES));
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(chunk.buffer);
+              }
+            }
+          };
+
+          source.connect(processorNode);
+          processorNode.connect(audioCtx.destination);
+        } catch (err) {
+          setStatus(`Gagal akses mikrofon: ${err.message}`, '#fb7185');
+          stopMicStreaming();
+        }
+      };
+
+      ws.onmessage = (evt) => {
+        const msg = JSON.parse(evt.data);
+        if (msg.type === 'chunk_result') {
+          sessionChunks.push(msg);
+          // Recompute summary client-side for live display
+          const infs = sessionChunks.map(c => c.inference_ms);
+          const tots = sessionChunks.map(c => c.total_ms);
+          const scs = sessionChunks.map(c => c.raw_score);
+          const rtfs = sessionChunks.map(c => c.rtf_total);
+          const sortedInf = [...infs].sort((a, b) => a - b);
+          const sortedTot = [...tots].sort((a, b) => a - b);
+          const p95Idx = Math.floor(0.95 * (sortedInf.length - 1));
+
+          updateKPIs({
+            num_chunks: sessionChunks.length,
+            model_type: msg.model_type,
+            mean_inference_ms: infs.reduce((a, b) => a + b, 0) / infs.length,
+            p95_inference_ms: sortedInf[p95Idx],
+            mean_total_ms: tots.reduce((a, b) => a + b, 0) / tots.length,
+            p95_total_ms: sortedTot[p95Idx],
+            mean_rtf: rtfs.reduce((a, b) => a + b, 0) / rtfs.length,
+            mean_raw_score: scs.reduce((a, b) => a + b, 0) / scs.length
+          });
+          renderTable(sessionChunks, []);
+          drawCharts(sessionChunks, []);
+        }
+      };
+    }
+
+    function stopMicStreaming() {
+      if (processorNode) { processorNode.disconnect(); processorNode = null; }
+      if (audioCtx) { audioCtx.close(); audioCtx = null; }
+      if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+      if (ws) { ws.close(); ws = null; }
+      document.getElementById('btnStartMic').disabled = false;
+      document.getElementById('btnStopMic').disabled = true;
+      setStatus('Streaming Dihentikan', '#94a3b8');
+    }
+
+    function exportSessionCSV() {
+      if (!sessionChunks || sessionChunks.length === 0) {
+        alert('Belum ada data sesi untuk diekspor.');
+        return;
+      }
+      const headers = ['chunk_index', 'model_type', 'raw_score', 'logit_bonafide', 'logit_spoof', 'feature_ms', 'inference_ms', 'total_ms', 'rtf_total'];
+      const rows = sessionChunks.map(c => headers.map(h => c[h]).join(','));
+      const csvContent = [headers.join(','), ...rows].join('\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `vocal_guard_demo_session_${Date.now()}.csv`;
+      a.click();
+    }
+  </script>
+</body>
+</html>
