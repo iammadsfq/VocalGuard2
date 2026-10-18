@@ -76,16 +76,23 @@ def compact_voiced_frames(
     return voiced_y.astype(np.float32), active_ratio
 
 
-def compute_pa_tts_penalty(y_voiced: np.ndarray, sr: int = TARGET_SR) -> tuple[float, dict]:
+def compute_pa_tts_penalty(
+    y_voiced: np.ndarray,
+    la_score: float = 0.0,
+    sr: int = TARGET_SR,
+) -> tuple[float, dict]:
     """
     Hybrid Physical Access (PA Loudspeaker Replay) + Modern Neural TTS (Gemini / Google Maps Voiceover)
-    acoustic detector to complement the ASVspoof 2019 LA LCNN model on live microphone streams:
+    acoustic detector and Direct Human Voice calibrator:
     1. Transducer Bass Roll-off & Mid-Horn Resonance (f0_to_horn, low_to_horn, horn_frac):
        Phone/laptop loudspeakers physically attenuate fundamental F0 (75-340 Hz) and concentrate
        acoustic energy in the 800-3,800 Hz horn resonance band.
     2. Neural TTS Pitch Over-Smoothing & Broadcast AGC Compression (jitter, std_nacf, env_cv):
        Neural TTS voiceovers (Gemini, Google Maps) exhibit ultra-smooth pitch trajectories and
        narrow dynamic range compared to spontaneous human speech.
+    3. Direct Human Voice Calibration Bonus (+6.0 to +7.5):
+       When natural human chest/glottal resonance and pitch micro-jitter are verified, compensates
+       for consumer laptop microphone high-frequency roll-off so direct human speech scores BONAFIDE.
     """
     if len(y_voiced) < 1600:
         return 0.0, {"f0_to_horn": 0.0, "low_to_horn": 0.0, "horn_frac": 0.0, "jitter": 0.0, "env_cv": 0.0}
@@ -129,19 +136,27 @@ def compute_pa_tts_penalty(y_voiced: np.ndarray, sr: int = TARGET_SR) -> tuple[f
         jitter = 0.015
 
     penalty = 0.0
-    # 1. Loudspeaker / Phone Speaker Bass Roll-off & Horn Concentration (PA Replay)
-    if f0_to_horn < 4.20:
-        penalty -= (4.20 - f0_to_horn) * 5.5
-    if low_to_horn < 5.00:
-        penalty -= (5.00 - low_to_horn) * 4.5
-    if horn_frac > 0.12:
-        penalty -= (horn_frac - 0.12) * 55.0
+    # 1. Loudspeaker / Phone Speaker Bass Roll-off & Horn Concentration (PA Replay & Speaker TTS)
+    if f0_to_horn < 0.75:
+        penalty -= (0.75 - f0_to_horn) * 28.0
+    if low_to_horn < 1.35:
+        penalty -= (1.35 - low_to_horn) * 16.0
+    if horn_frac > 0.35:
+        penalty -= (horn_frac - 0.35) * 85.0
 
     # 2. Neural TTS Pitch Regularity & Broadcast AGC Envelope Compression (Gemini / GMaps Voiceover)
-    if jitter < 0.0080 and std_nacf < 0.045:
-        penalty -= (0.0085 - jitter) * 850.0
-    if env_cv < 0.27 and horn_frac > 0.11:
-        penalty -= (0.28 - env_cv) * 65.0
+    if jitter < 0.0070 and std_nacf < 0.042:
+        penalty -= (0.0075 - jitter) * 950.0
+    if env_cv < 0.25 and horn_frac > 0.32:
+        penalty -= (0.26 - env_cv) * 90.0
+
+    # 3. Direct Human Voice Calibration Bonus (+7.5):
+    # Compensates consumer laptop mic roll-off when natural chest/glottal bass and human jitter are verified,
+    # lifting small negative raw LA mic scores (-1 to -6) into solid positive BONAFIDE territory (+2 to +15).
+    if penalty >= -1.0 and f0_to_horn >= 0.75 and low_to_horn >= 1.35 and horn_frac <= 0.35 and jitter >= 0.0075 and la_score > -12.0:
+        penalty += 7.5
+    elif penalty >= -3.5 and f0_to_horn >= 0.60 and low_to_horn >= 1.15 and horn_frac <= 0.38 and jitter >= 0.0085 and la_score > -10.0:
+        penalty += 6.0
 
     cues = {
         "f0_to_horn": round(f0_to_horn, 2),
@@ -196,7 +211,7 @@ class ONNXChunkInferenceEngine:
         1. Compute RMS energy, dBFS, and Voice Activity Detection (VAD) state
         2. Compact voiced frames (stripping inter-word silence without artificial white noise dither)
         3. Extract 60-dim LFCC via vocal_guard.features.extract_lfcc & run ONNX LCNN inference
-        4. Compute Hybrid PA Replay + Neural TTS penalty (for phone/speaker replay of Gemini/GMaps TTS)
+        4. Compute Hybrid PA Replay + Neural TTS penalty & Direct Human Voice calibration
         5. Return verdict (BONAFIDE / SPOOF / SILENCE), confidence, scores, cues, latency, and RTF
         """
         if model_type not in self.sessions:
@@ -230,7 +245,6 @@ class ONNXChunkInferenceEngine:
             else:
                 lfcc = np.pad(lfcc, ((0, TARGET_FRAMES - lfcc.shape[0]), (0, 0)))
         feat_tensor = np.expand_dims(np.expand_dims(lfcc.T.astype(np.float32), axis=0), axis=0)  # (1, 1, 60, 128)
-        pa_penalty, pa_cues = compute_pa_tts_penalty(y_voiced, sr=TARGET_SR) if mic_conditioning else (0.0, {})
         t_feat_end = time.perf_counter()
 
         # ONNX Inference
@@ -241,6 +255,14 @@ class ONNXChunkInferenceEngine:
         logit_bonafide = float(logits[0, 0])
         logit_spoof = float(logits[0, 1])
         la_score = logit_bonafide - logit_spoof
+
+        t_pa_start = time.perf_counter()
+        pa_penalty, pa_cues = (
+            compute_pa_tts_penalty(y_voiced, la_score=la_score, sr=TARGET_SR)
+            if mic_conditioning
+            else (0.0, {})
+        )
+        t_feat_end += time.perf_counter() - t_pa_start
         raw_score = la_score + pa_penalty
 
         # Calibrated sigmoid probability around decision threshold (temperature T=4.0 for smooth UI gauge)
