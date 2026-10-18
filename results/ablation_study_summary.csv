@@ -1,0 +1,10 @@
+Model,Backbone,Pooling,Window / Trim,Params,Dev EER (%),Eval EER (%),Catatan / Hipotesis
+Original Vocal-Guard,MobileNetV2 (Frozen ImageNet),GAP,1s / No Trim,3500000,41.22,-,Sistem awal gagal (setara acak)
+Baseline B0 (Sanity),"GMM (256 diag, custom LFCC)",Frame Mean LogProb,Full / No Trim,0,32.18,-,Di atas acak (pipeline label valid)
+M2 (Ablation H1),MobileNetV2 (from scratch),GAP (1x1),4s / No Trim,2225858,1.28,-,Isolasi H1: efek melatih backbone visual dari nol
+M3 (Ablation H2),LCNN (from scratch),GAP (1x1),4s / No Trim,314434,0.47,-,Isolasi H2: efek GAP merata-ratakan dimensi waktu
+M1 (LCNN Full 4s FP32),LCNN + MFM,AdaptivePool (3x4),4s / No Trim,539714,0.37,4.59,Model utama pada Dev (A01-A06) & Eval (A07-A19)
+M1-Q (ONNX INT8 Subset),LCNN + MFM (INT8),AdaptivePool (3x4),4s / No Trim (2k sub),539714,0.59,-,Paritas INT8 vs FP32 (0.59%)
+M1-CrossTrim (Uji H6a),LCNN + MFM (latih tanpa trim),AdaptivePool (3x4),4s / Dev Trimmed,539714,12.11,-,Isolasi H6: ketergantungan M1 pada durasi hening
+M1-Trim (Uji H6b),LCNN + MFM (latih + uji trim),AdaptivePool (3x4),4s / VAD Trimmed,539714,6.71,-,Isolasi H6: performa setelah hening dihapus
+M1-Chunk1.28s,LCNN + MFM,AdaptivePool (3x4),1.28s (128f) / No Trim,539714,1.33,-,Akurasi riil untuk pasangan latensi chunk 1.28s
