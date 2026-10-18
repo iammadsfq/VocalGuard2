@@ -73,13 +73,17 @@ class ONNXChunkInferenceEngine:
         audio_chunk_16k: np.ndarray,
         model_type: Literal["fp32", "int8"] = "fp32",
         chunk_index: int = 0,
+        threshold: float = 0.0,
+        vad_guard: bool = True,
+        vad_rms_threshold: float = 0.008,
     ) -> dict:
         """
         Run full end-to-end pipeline on a single 1.28s audio chunk:
-        1. Pad/wrap chunk to produce exactly 128 LFCC frames
-        2. Extract 60-dim LFCC via vocal_guard.features.extract_lfcc
-        3. Run ONNX Runtime inference
-        4. Return raw score, logits, feature time, inference time, total latency, and RTF
+        1. Compute RMS energy, dBFS, and Voice Activity Detection (VAD) state
+        2. Pad/wrap chunk to produce exactly 128 LFCC frames
+        3. Extract 60-dim LFCC via vocal_guard.features.extract_lfcc
+        4. Run ONNX Runtime inference
+        5. Return verdict (BONAFIDE / SPOOF / SILENCE), confidence, raw score, logits, latency, and RTF
         """
         if model_type not in self.sessions:
             model_type = "fp32"
@@ -90,12 +94,16 @@ class ONNXChunkInferenceEngine:
 
         # Ensure 1D float32 and exact sample count for 128 frames
         y = np.asarray(audio_chunk_16k, dtype=np.float32).reshape(-1)
+        rms_energy = float(np.sqrt(np.mean(y ** 2) + 1e-12))
+        peak_amp = float(np.max(np.abs(y))) if len(y) > 0 else 0.0
+        db_fs = float(20.0 * np.log10(max(rms_energy, 1e-7)))
+        is_speech = bool(rms_energy >= vad_rms_threshold)
+
         y_padded = pad_or_truncate(y, target_length=LFCC_REQUIRED_SAMPLES_128F)
 
         t_feat_start = time.perf_counter()
         lfcc = extract_lfcc(y_padded, sr=TARGET_SR, with_deltas=True)  # (128, 60)
         if lfcc.shape[0] != TARGET_FRAMES:
-            # Safety guard
             if lfcc.shape[0] > TARGET_FRAMES:
                 lfcc = lfcc[:TARGET_FRAMES, :]
             else:
@@ -112,6 +120,22 @@ class ONNXChunkInferenceEngine:
         logit_spoof = float(logits[0, 1])
         raw_score = logit_bonafide - logit_spoof
 
+        # Calibrated sigmoid probability around decision threshold (temperature T=4.0 for smooth UI gauge)
+        shifted_score = (raw_score - threshold) / 4.0
+        shifted_score = float(np.clip(shifted_score, -20.0, 20.0))
+        prob_bonafide = float(1.0 / (1.0 + np.exp(-shifted_score)))
+        prob_spoof = float(1.0 - prob_bonafide)
+
+        if vad_guard and not is_speech:
+            verdict = "SILENCE"
+            confidence_pct = 0.0
+        elif raw_score >= threshold:
+            verdict = "BONAFIDE"
+            confidence_pct = round(prob_bonafide * 100.0, 1)
+        else:
+            verdict = "SPOOF"
+            confidence_pct = round(prob_spoof * 100.0, 1)
+
         feat_ms = (t_feat_end - t_feat_start) * 1000.0
         infer_ms = (t_inf_end - t_inf_start) * 1000.0
         total_ms = (t_inf_end - t_start) * 1000.0
@@ -119,12 +143,15 @@ class ONNXChunkInferenceEngine:
         rtf_infer = (infer_ms / 1000.0) / CHUNK_DURATION_SEC
         rtf_total = (total_ms / 1000.0) / CHUNK_DURATION_SEC
 
-        rms_energy = float(np.sqrt(np.mean(y ** 2) + 1e-12))
-
         return {
             "chunk_index": chunk_index,
             "duration_sec": CHUNK_DURATION_SEC,
             "model_type": model_type.upper(),
+            "verdict": verdict,
+            "confidence_pct": confidence_pct,
+            "prob_bonafide_pct": round(prob_bonafide * 100.0, 1),
+            "prob_spoof_pct": round(prob_spoof * 100.0, 1),
+            "threshold": round(threshold, 4),
             "raw_score": round(raw_score, 4),
             "logit_bonafide": round(logit_bonafide, 4),
             "logit_spoof": round(logit_spoof, 4),
@@ -134,10 +161,13 @@ class ONNXChunkInferenceEngine:
             "rtf_inference": round(rtf_infer, 5),
             "rtf_total": round(rtf_total, 5),
             "rms_energy": round(rms_energy, 5),
+            "peak_amp": round(peak_amp, 4),
+            "db_fs": round(db_fs, 1),
+            "is_speech": is_speech,
         }
 
 
-app = FastAPI(title="Vocal-Guard Streaming Demo", version="0.1.0")
+app = FastAPI(title="Vocal-Guard Streaming Demo", version="0.2.0")
 engine = ONNXChunkInferenceEngine()
 
 
@@ -153,25 +183,47 @@ def load_and_resample_to_16k_mono(raw_bytes: bytes) -> tuple[np.ndarray, float]:
     return data, orig_duration
 
 
-def summarize_chunks(chunks: list[dict], model_type: str) -> dict:
+def summarize_chunks(chunks: list[dict], model_type: str, threshold: float = 0.0) -> dict:
     if not chunks:
         return {}
     inf_ms = np.array([c["inference_ms"] for c in chunks])
     tot_ms = np.array([c["total_ms"] for c in chunks])
+    feat_ms = np.array([c["feature_ms"] for c in chunks])
     scores = np.array([c["raw_score"] for c in chunks])
     rtfs = np.array([c["rtf_total"] for c in chunks])
+    rtfs_inf = np.array([c["rtf_inference"] for c in chunks])
+
+    active_chunks = [c for c in chunks if c.get("verdict") != "SILENCE"]
+    bonafide_count = sum(1 for c in chunks if c.get("verdict") == "BONAFIDE")
+    spoof_count = sum(1 for c in chunks if c.get("verdict") == "SPOOF")
+    silence_count = sum(1 for c in chunks if c.get("verdict") == "SILENCE")
+
+    if active_chunks:
+        active_scores = np.array([c["raw_score"] for c in active_chunks])
+        mean_active_score = float(np.mean(active_scores))
+        session_verdict = "BONAFIDE" if mean_active_score >= threshold else "SPOOF"
+    else:
+        mean_active_score = float(np.mean(scores))
+        session_verdict = "SILENCE"
 
     model_size_mb = 2.08 if model_type.lower() == "fp32" else 0.56
     return {
         "num_chunks": len(chunks),
+        "bonafide_chunks": bonafide_count,
+        "spoof_chunks": spoof_count,
+        "silence_chunks": silence_count,
+        "session_verdict": session_verdict,
         "model_type": model_type.upper(),
         "model_size_mb": model_size_mb,
+        "mean_feature_ms": round(float(np.mean(feat_ms)), 2),
         "mean_inference_ms": round(float(np.mean(inf_ms)), 2),
         "p95_inference_ms": round(float(np.percentile(inf_ms, 95)), 2),
         "mean_total_ms": round(float(np.mean(tot_ms)), 2),
         "p95_total_ms": round(float(np.percentile(tot_ms, 95)), 2),
+        "mean_rtf_inference": round(float(np.mean(rtfs_inf)), 5),
         "mean_rtf": round(float(np.mean(rtfs)), 5),
         "mean_raw_score": round(float(np.mean(scores)), 4),
+        "mean_active_score": round(mean_active_score, 4),
         "min_raw_score": round(float(np.min(scores)), 4),
         "max_raw_score": round(float(np.max(scores)), 4),
     }
@@ -210,6 +262,8 @@ async def analyze_file(
     file: UploadFile = File(...),
     model_type: str = Form("fp32"),
     compare_both: bool = Form(False),
+    threshold: float = Form(0.0),
+    vad_guard: bool = Form(True),
 ):
     """
     Slice uploaded audio file into 1.28s (20,480 sample) chunks and run chunk-by-chunk
@@ -224,7 +278,6 @@ async def analyze_file(
     if len(audio_16k) == 0:
         raise HTTPException(status_code=400, detail="File audio kosong.")
 
-    # Slice into 1.28s (20,480 samples) chunks
     num_chunks = max(1, int(np.ceil(len(audio_16k) / CHUNK_SAMPLES)))
     m_type: Literal["fp32", "int8"] = "int8" if model_type.lower() == "int8" else "fp32"
 
@@ -238,14 +291,28 @@ async def analyze_file(
         if len(segment) < CHUNK_SAMPLES:
             segment = pad_or_truncate(segment, target_length=CHUNK_SAMPLES)
 
-        res_p = engine.process_chunk(segment, model_type=m_type, chunk_index=i + 1)
+        res_p = engine.process_chunk(
+            segment,
+            model_type=m_type,
+            chunk_index=i + 1,
+            threshold=threshold,
+            vad_guard=vad_guard,
+        )
         res_p["start_sec"] = round(i * CHUNK_DURATION_SEC, 2)
         res_p["end_sec"] = round((i + 1) * CHUNK_DURATION_SEC, 2)
         chunks_primary.append(res_p)
 
         if compare_both:
             other_type: Literal["fp32", "int8"] = "int8" if m_type == "fp32" else "fp32"
-            res_s = engine.process_chunk(segment, model_type=other_type, chunk_index=i + 1)
+            res_s = engine.process_chunk(
+                segment,
+                model_type=other_type,
+                chunk_index=i + 1,
+                threshold=threshold,
+                vad_guard=vad_guard,
+            )
+            res_s["start_sec"] = res_p["start_sec"]
+            res_s["end_sec"] = res_p["end_sec"]
             chunks_secondary.append(res_s)
 
     response = {
@@ -254,7 +321,7 @@ async def analyze_file(
         "sample_rate": TARGET_SR,
         "chunk_duration_sec": CHUNK_DURATION_SEC,
         "primary": {
-            "summary": summarize_chunks(chunks_primary, m_type),
+            "summary": summarize_chunks(chunks_primary, m_type, threshold=threshold),
             "chunks": chunks_primary,
         },
     }
@@ -265,7 +332,7 @@ async def analyze_file(
             for p, s in zip(chunks_primary, chunks_secondary)
         ]
         response["comparison"] = {
-            "summary": summarize_chunks(chunks_secondary, other_label),
+            "summary": summarize_chunks(chunks_secondary, other_label, threshold=threshold),
             "chunks": chunks_secondary,
             "mean_abs_score_diff": round(float(np.mean(score_diffs)), 4),
             "max_abs_score_diff": round(float(np.max(score_diffs)), 4),
@@ -278,27 +345,47 @@ async def analyze_file(
 async def websocket_stream(websocket: WebSocket):
     """
     Real-time WebSocket endpoint receiving raw Float32 PCM chunks (20,480 samples @ 16kHz)
-    and returning JSON metrics immediately per chunk.
-    Query param: ?model_type=fp32 or ?model_type=int8
+    and returning live detection verdict + full metrics per chunk.
+    Supports live side-by-side FP32 vs INT8 comparison and configurable threshold/VAD.
     """
     await websocket.accept()
-    model_type_param = websocket.query_params.get("model_type", "fp32").lower()
+    q = websocket.query_params
+    model_type_param = q.get("model_type", "fp32").lower()
     m_type: Literal["fp32", "int8"] = "int8" if model_type_param == "int8" else "fp32"
+    compare_both: bool = q.get("compare_both", "true").lower() == "true"
+    threshold: float = float(q.get("threshold", "0.0"))
+    vad_guard: bool = q.get("vad_guard", "true").lower() == "true"
+    hop_sec: float = float(q.get("hop_sec", "0.64"))
     chunk_idx = 0
 
     try:
         while True:
             message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
             if "text" in message and message["text"]:
-                # Allow switching model dynamically via JSON text command
                 import json
                 try:
                     cmd = json.loads(message["text"])
                     if "model_type" in cmd:
                         m_type = "int8" if str(cmd["model_type"]).lower() == "int8" else "fp32"
-                        await websocket.send_json({"type": "config_ack", "model_type": m_type.upper()})
+                    if "compare_both" in cmd:
+                        compare_both = bool(cmd["compare_both"])
+                    if "threshold" in cmd:
+                        threshold = float(cmd["threshold"])
+                    if "vad_guard" in cmd:
+                        vad_guard = bool(cmd["vad_guard"])
+                    if "hop_sec" in cmd:
+                        hop_sec = float(cmd["hop_sec"])
                     if cmd.get("action") == "reset":
                         chunk_idx = 0
+                    await websocket.send_json({
+                        "type": "config_ack",
+                        "model_type": m_type.upper(),
+                        "compare_both": compare_both,
+                        "threshold": threshold,
+                        "vad_guard": vad_guard,
+                    })
                 except Exception:
                     pass
             elif "bytes" in message and message["bytes"]:
@@ -307,8 +394,35 @@ async def websocket_stream(websocket: WebSocket):
                 if len(audio_f32) == 0:
                     continue
                 chunk_idx += 1
-                res = engine.process_chunk(audio_f32, model_type=m_type, chunk_index=chunk_idx)
-                res["type"] = "chunk_result"
-                await websocket.send_json(res)
-    except WebSocketDisconnect:
+                end_sec = round(chunk_idx * hop_sec, 2)
+                start_sec = round(max(0.0, end_sec - CHUNK_DURATION_SEC), 2)
+
+                res_p = engine.process_chunk(
+                    audio_f32,
+                    model_type=m_type,
+                    chunk_index=chunk_idx,
+                    threshold=threshold,
+                    vad_guard=vad_guard,
+                )
+                res_p["start_sec"] = start_sec
+                res_p["end_sec"] = end_sec
+                res_p["type"] = "chunk_result"
+
+                if compare_both:
+                    other_type: Literal["fp32", "int8"] = "int8" if m_type == "fp32" else "fp32"
+                    res_s = engine.process_chunk(
+                        audio_f32,
+                        model_type=other_type,
+                        chunk_index=chunk_idx,
+                        threshold=threshold,
+                        vad_guard=vad_guard,
+                    )
+                    res_s["start_sec"] = start_sec
+                    res_s["end_sec"] = end_sec
+                    res_p["comparison"] = res_s
+
+                await websocket.send_json(res_p)
+    except (WebSocketDisconnect, RuntimeError):
         pass
+
+
