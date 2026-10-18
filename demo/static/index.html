@@ -673,6 +673,11 @@
             Filter Hening (VAD)
           </label>
 
+          <label style="display:flex; align-items:center; gap:5px; cursor:pointer; color:#10b981; font-weight:600;" title="Menghapus jeda antar-kata (H6) & menormalisasi roll-off mikrofon laptop agar sesuai kondisi studio ASVspoof">
+            <input type="checkbox" id="micCondToggle" checked onchange="syncStreamConfig()" />
+            Kalibrasi Mikrofon Studio
+          </label>
+
           <label style="display:flex; align-items:center; gap:5px; cursor:pointer; color:var(--accent); font-weight:600;">
             <input type="checkbox" id="compareBothToggle" checked onchange="syncStreamConfig()" />
             Bandingkan FP32 vs INT8 Live
@@ -690,7 +695,7 @@
             </button>
           </div>
           <div class="note-small">
-            💡 <strong>Cara Kerja Live Streaming:</strong> Klik <em>Mulai Rekam</em> lalu berbicara ke mikrofon. Suara Anda di-<em>downsample</em> ke 16 kHz mono secara <em>real-time</em>. Setiap <strong>0.50 detik</strong>, jendela <strong>1.28 detik terakhir (20.480 sampel)</strong> dikirim lewat WebSocket ke mesin <code>LFCC + LCNN ONNX</code> untuk menampilkan deteksi <strong>BONAFIDE / FAKE</strong> beserta metrik latensi seketika.
+            💡 <strong>Kalibrasi Mikrofon Studio Aktif:</strong> Mikrofon laptop biasa memotong frekuensi &gt;3.8 kHz dan memiliki jeda hening antar-kata yang memicu <em>silence shortcut</em> (H6). Dengan fitur <strong>Kalibrasi Mikrofon Studio</strong>, sistem otomatis memotong jeda hening dalam chunk, menormalisasi RMS ke level studio ASVspoof, dan menjaga keseimbangan pita frekuensi tinggi sehingga suara asli Anda terdeteksi akurat sebagai <strong>BONAFIDE</strong>.
           </div>
         </div>
 
@@ -872,6 +877,7 @@
         hop_sec: parseFloat(document.getElementById('hopSelect').value || '0.50'),
         threshold: parseFloat(document.getElementById('thresholdInput').value || '0.0'),
         vad_guard: document.getElementById('vadGuardToggle').checked,
+        mic_conditioning: document.getElementById('micCondToggle').checked,
         compare_both: document.getElementById('compareBothToggle').checked,
       };
     }
@@ -930,7 +936,7 @@
       if (chunk.verdict === 'SILENCE') {
         card.classList.add('state-silence');
         titleEl.innerHTML = `<span style="color:#94a3b8;">⚪ HENING / TANPA SUARA AKTIF (VAD)</span>`;
-        pillEl.textContent = `Skor Mentah: ${scoreSign}${chunk.raw_score.toFixed(2)} | Energi: ${chunk.db_fs.toFixed(1)} dBFS`;
+        pillEl.textContent = `Energi: ${chunk.db_fs.toFixed(1)} dBFS | Menunggu Suara...`;
         markerEl.style.left = '50%';
       } else if (chunk.verdict === 'BONAFIDE') {
         card.classList.add('state-bonafide');
@@ -1061,7 +1067,6 @@
     function renderTable(chunks, compChunks) {
       const tbody = document.getElementById('chunkTableBody');
       tbody.innerHTML = '';
-      // Tampilkan chunk terbaru di paling atas agar langsung terlihat saat streaming
       const reversedIndices = chunks.map((_, i) => i).reverse();
       reversedIndices.forEach((idx) => {
         const c = chunks[idx];
@@ -1113,7 +1118,6 @@
       const H = canvas.height;
       ctx.clearRect(0, 0, W, H);
 
-      // Center line
       ctx.strokeStyle = '#1e293b';
       ctx.beginPath();
       ctx.moveTo(0, H / 2);
@@ -1149,7 +1153,7 @@
       ctx.clearRect(0, 0, W, H);
       if (!chunks || chunks.length === 0) return;
 
-      const viewChunks = chunks.slice(-30); // Tampilkan 30 chunk terakhir agar grafik rapi saat streaming panjang
+      const viewChunks = chunks.slice(-30);
       const padL = 48, padR = 20, padT = 20, padB = 30;
       const plotW = W - padL - padR;
       const plotH = H - padT - padB;
@@ -1250,7 +1254,6 @@
       });
     }
 
-    // Handle incoming WebSocket chunk result (used by both Live Mic and Live File Stream)
     function handleIncomingStreamChunk(msg) {
       if (msg.type !== 'chunk_result') return;
       const cfg = getStreamConfig();
@@ -1279,10 +1282,11 @@
       drawCharts(sessionChunks, comparisonChunks);
     }
 
-    function openStreamingWebSocket(onReadyCallback) {
+    function openStreamingWebSocket(onReadyCallback, forceMicCond = null) {
       const cfg = getStreamConfig();
+      const micCond = forceMicCond !== null ? forceMicCond : cfg.mic_conditioning;
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const url = `${proto}://${window.location.host}/ws/stream?model_type=${cfg.model_type}&compare_both=${cfg.compare_both}&threshold=${cfg.threshold}&vad_guard=${cfg.vad_guard}&hop_sec=${cfg.hop_sec}`;
+      const url = `${proto}://${window.location.host}/ws/stream?model_type=${cfg.model_type}&compare_both=${cfg.compare_both}&threshold=${cfg.threshold}&vad_guard=${cfg.vad_guard}&mic_conditioning=${micCond}&hop_sec=${cfg.hop_sec}`;
       ws = new WebSocket(url);
       ws.onopen = () => {
         if (onReadyCallback) onReadyCallback();
@@ -1329,7 +1333,7 @@
             const cfg = getStreamConfig();
             const hopSamples = Math.max(4000, Math.round(cfg.hop_sec * TARGET_SR));
 
-            // Downsample to 16kHz if needed
+            // Anti-aliased boxcar downsampling to 16kHz if browser sampleRate != 16000
             let chunk16k = [];
             if (inSr === TARGET_SR) {
               for (let i = 0; i < inputData.length; i++) chunk16k.push(inputData[i]);
@@ -1337,9 +1341,14 @@
               const ratio = inSr / TARGET_SR;
               const outLen = Math.floor(inputData.length / ratio);
               for (let i = 0; i < outLen; i++) {
-                chunk16k.push(inputData[Math.floor(i * ratio)]);
+                const startIdx = Math.floor(i * ratio);
+                const endIdx = Math.min(inputData.length, Math.ceil((i + 1) * ratio));
+                let sum = 0;
+                for (let j = startIdx; j < endIdx; j++) sum += inputData[j];
+                chunk16k.push(sum / Math.max(1, endIdx - startIdx));
               }
             }
+
 
             // Compute live RMS dBFS & draw waveform
             let sumSq = 0;

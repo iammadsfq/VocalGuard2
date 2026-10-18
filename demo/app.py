@@ -40,6 +40,57 @@ LFCC_REQUIRED_SAMPLES_128F = 20640
 TARGET_FRAMES = 128
 
 
+def trim_silence_rms(
+    y: np.ndarray,
+    frame_len: int = 320,
+    hop_len: int = 160,
+    rel_thresh: float = 0.15,
+    abs_Floor: float = 0.003,
+) -> tuple[np.ndarray, float]:
+    """
+    Strip inter-word silence frames inside a chunk (mitigating H6 silence shortcut)
+    and return (active_audio, active_frame_ratio).
+    """
+    if len(y) < frame_len:
+        return y, 1.0
+    n_f = 1 + (len(y) - frame_len) // hop_len
+    frames = np.lib.stride_tricks.as_strided(
+        y,
+        shape=(n_f, frame_len),
+        strides=(y.strides[0] * hop_len, y.strides[0]),
+    )
+    rms = np.sqrt(np.mean(frames ** 2, axis=1) + 1e-12)
+    peak_rms = float(np.max(rms))
+    thresh = max(abs_Floor, peak_rms * rel_thresh)
+    keep = rms >= thresh
+    active_ratio = float(np.mean(keep))
+    if int(np.sum(keep)) < 6:
+        return y, active_ratio
+    idx = np.where(keep)[0]
+    active_y = np.concatenate([y[i * hop_len : i * hop_len + hop_len] for i in idx])
+    return active_y.astype(np.float32), active_ratio
+
+
+def condition_live_mic_audio(y: np.ndarray) -> tuple[np.ndarray, float]:
+    """
+    Calibrate raw consumer laptop microphone audio to match ASVspoof 2019 LA studio conditions:
+    1. Remove DC offset.
+    2. Strip inter-word silent pauses via frame-level RMS VAD (mitigating H6 silence shortcut).
+    3. Normalize active voiced segments to ASVspoof studio RMS (~0.18).
+    4. Add a natural studio thermal floor (-42 dBFS) so laptop mic high-frequency roll-off (>3.8 kHz)
+       does not trigger the ln(0 + 1e-12) = -27.63 cliff in upper LFCC filterbanks.
+    """
+    y = y - float(np.mean(y))
+    y_active, active_ratio = trim_silence_rms(y, rel_thresh=0.15)
+    rms = float(np.sqrt(np.mean(y_active ** 2) + 1e-12))
+    y_norm = y_active * (0.18 / rms)
+    y_norm = np.clip(y_norm, -0.98, 0.98)
+    seed = int(abs(float(np.sum(y_norm)) * 1000.0)) % 10007
+    rng = np.random.default_rng(seed)
+    dither = rng.normal(0.0, 0.0075, size=len(y_norm)).astype(np.float32)
+    return (y_norm + dither).astype(np.float32), active_ratio
+
+
 class ONNXChunkInferenceEngine:
     """Manages single-threaded ONNX Runtime sessions for FP32 and INT8 models."""
 
@@ -75,15 +126,17 @@ class ONNXChunkInferenceEngine:
         chunk_index: int = 0,
         threshold: float = 0.0,
         vad_guard: bool = True,
-        vad_rms_threshold: float = 0.008,
+        vad_rms_threshold: float = 0.007,
+        mic_conditioning: bool = False,
     ) -> dict:
         """
         Run full end-to-end pipeline on a single 1.28s audio chunk:
         1. Compute RMS energy, dBFS, and Voice Activity Detection (VAD) state
-        2. Pad/wrap chunk to produce exactly 128 LFCC frames
-        3. Extract 60-dim LFCC via vocal_guard.features.extract_lfcc
-        4. Run ONNX Runtime inference
-        5. Return verdict (BONAFIDE / SPOOF / SILENCE), confidence, raw score, logits, latency, and RTF
+        2. Optionally apply Live Microphone Studio Conditioning (for live WebSocket mic streams)
+        3. Pad/wrap chunk to produce exactly 128 LFCC frames
+        4. Extract 60-dim LFCC via vocal_guard.features.extract_lfcc
+        5. Run ONNX Runtime inference
+        6. Return verdict (BONAFIDE / SPOOF / SILENCE), confidence, raw score, logits, latency, and RTF
         """
         if model_type not in self.sessions:
             model_type = "fp32"
@@ -92,14 +145,21 @@ class ONNXChunkInferenceEngine:
 
         t_start = time.perf_counter()
 
-        # Ensure 1D float32 and exact sample count for 128 frames
-        y = np.asarray(audio_chunk_16k, dtype=np.float32).reshape(-1)
-        rms_energy = float(np.sqrt(np.mean(y ** 2) + 1e-12))
-        peak_amp = float(np.max(np.abs(y))) if len(y) > 0 else 0.0
+        # Ensure 1D float32 and measure raw signal energy before any conditioning
+        y_raw = np.asarray(audio_chunk_16k, dtype=np.float32).reshape(-1)
+        rms_energy = float(np.sqrt(np.mean(y_raw ** 2) + 1e-12))
+        peak_amp = float(np.max(np.abs(y_raw))) if len(y_raw) > 0 else 0.0
         db_fs = float(20.0 * np.log10(max(rms_energy, 1e-7)))
-        is_speech = bool(rms_energy >= vad_rms_threshold)
 
-        y_padded = pad_or_truncate(y, target_length=LFCC_REQUIRED_SAMPLES_128F)
+        if mic_conditioning:
+            y_proc, active_ratio = condition_live_mic_audio(y_raw)
+            is_speech = bool(rms_energy >= vad_rms_threshold and active_ratio >= 0.12)
+        else:
+            y_proc = y_raw
+            _, active_ratio = trim_silence_rms(y_raw)
+            is_speech = bool(rms_energy >= vad_rms_threshold)
+
+        y_padded = pad_or_truncate(y_proc, target_length=LFCC_REQUIRED_SAMPLES_128F)
 
         t_feat_start = time.perf_counter()
         lfcc = extract_lfcc(y_padded, sr=TARGET_SR, with_deltas=True)  # (128, 60)
@@ -163,8 +223,11 @@ class ONNXChunkInferenceEngine:
             "rms_energy": round(rms_energy, 5),
             "peak_amp": round(peak_amp, 4),
             "db_fs": round(db_fs, 1),
+            "active_speech_ratio": round(active_ratio, 2),
             "is_speech": is_speech,
+            "mic_conditioning": mic_conditioning,
         }
+
 
 
 app = FastAPI(title="Vocal-Guard Streaming Demo", version="0.2.0")
@@ -346,7 +409,8 @@ async def websocket_stream(websocket: WebSocket):
     """
     Real-time WebSocket endpoint receiving raw Float32 PCM chunks (20,480 samples @ 16kHz)
     and returning live detection verdict + full metrics per chunk.
-    Supports live side-by-side FP32 vs INT8 comparison and configurable threshold/VAD.
+    Supports live side-by-side FP32 vs INT8 comparison, configurable threshold/VAD,
+    and Live Microphone Studio Conditioning (default True).
     """
     await websocket.accept()
     q = websocket.query_params
@@ -355,7 +419,8 @@ async def websocket_stream(websocket: WebSocket):
     compare_both: bool = q.get("compare_both", "true").lower() == "true"
     threshold: float = float(q.get("threshold", "0.0"))
     vad_guard: bool = q.get("vad_guard", "true").lower() == "true"
-    hop_sec: float = float(q.get("hop_sec", "0.64"))
+    mic_conditioning: bool = q.get("mic_conditioning", "true").lower() == "true"
+    hop_sec: float = float(q.get("hop_sec", "0.50"))
     chunk_idx = 0
 
     try:
@@ -375,6 +440,8 @@ async def websocket_stream(websocket: WebSocket):
                         threshold = float(cmd["threshold"])
                     if "vad_guard" in cmd:
                         vad_guard = bool(cmd["vad_guard"])
+                    if "mic_conditioning" in cmd:
+                        mic_conditioning = bool(cmd["mic_conditioning"])
                     if "hop_sec" in cmd:
                         hop_sec = float(cmd["hop_sec"])
                     if cmd.get("action") == "reset":
@@ -385,6 +452,7 @@ async def websocket_stream(websocket: WebSocket):
                         "compare_both": compare_both,
                         "threshold": threshold,
                         "vad_guard": vad_guard,
+                        "mic_conditioning": mic_conditioning,
                     })
                 except Exception:
                     pass
@@ -403,6 +471,7 @@ async def websocket_stream(websocket: WebSocket):
                     chunk_index=chunk_idx,
                     threshold=threshold,
                     vad_guard=vad_guard,
+                    mic_conditioning=mic_conditioning,
                 )
                 res_p["start_sec"] = start_sec
                 res_p["end_sec"] = end_sec
@@ -416,6 +485,7 @@ async def websocket_stream(websocket: WebSocket):
                         chunk_index=chunk_idx,
                         threshold=threshold,
                         vad_guard=vad_guard,
+                        mic_conditioning=mic_conditioning,
                     )
                     res_s["start_sec"] = start_sec
                     res_s["end_sec"] = end_sec
@@ -424,5 +494,6 @@ async def websocket_stream(websocket: WebSocket):
                 await websocket.send_json(res_p)
     except (WebSocketDisconnect, RuntimeError):
         pass
+
 
 
