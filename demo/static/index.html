@@ -673,9 +673,9 @@
             Filter Hening (VAD)
           </label>
 
-          <label style="display:flex; align-items:center; gap:5px; cursor:pointer; color:#10b981; font-weight:600;" title="Menghapus jeda antar-kata (H6) & menormalisasi roll-off mikrofon laptop agar sesuai kondisi studio ASVspoof">
+          <label style="display:flex; align-items:center; gap:5px; cursor:pointer; color:#10b981; font-weight:600;" title="Kompaksi frame aktif tanpa dither + Detektor Hybrid LA & PA Replay / Neural TTS (Gemini, Google Maps)">
             <input type="checkbox" id="micCondToggle" checked onchange="syncStreamConfig()" />
-            Kalibrasi Mikrofon Studio
+            Detektor Hybrid Mic (LA + Replay/TTS)
           </label>
 
           <label style="display:flex; align-items:center; gap:5px; cursor:pointer; color:var(--accent); font-weight:600;">
@@ -695,7 +695,7 @@
             </button>
           </div>
           <div class="note-small">
-            💡 <strong>Kalibrasi Mikrofon Studio Aktif:</strong> Mikrofon laptop biasa memotong frekuensi &gt;3.8 kHz dan memiliki jeda hening antar-kata yang memicu <em>silence shortcut</em> (H6). Dengan fitur <strong>Kalibrasi Mikrofon Studio</strong>, sistem otomatis memotong jeda hening dalam chunk, menormalisasi RMS ke level studio ASVspoof, dan menjaga keseimbangan pita frekuensi tinggi sehingga suara asli Anda terdeteksi akurat sebagai <strong>BONAFIDE</strong>.
+            💡 <strong>Detektor Hybrid LA + PA Replay / Neural TTS Aktif (Tanpa Dither Buatan):</strong> Menyatukan frame vokal aktif (mencegah <em>silence shortcut</em> H6 saat jeda bicara) sekaligus mendeteksi karakteristik speaker HP/laptop &amp; kemulusan pitch sintetis (<strong>Gemini TTS / Google Maps Voiceover</strong>) lewat rasio resonansi speaker (<code>f0_to_horn</code>, <code>horn_frac</code>) dan mikro-jitter.
           </div>
         </div>
 
@@ -848,6 +848,8 @@
 
     // Sliding window buffers for 16kHz mono streaming
     let ringBuffer16k = [];
+    let voicedRingBuffer16k = [];
+    let hopBuffer16k = [];
     let samplesSinceLastEmit = 0;
     let recordedPcm16k = [];
     let streamStartTime = 0;
@@ -894,6 +896,8 @@
       sessionChunks = [];
       comparisonChunks = [];
       ringBuffer16k = [];
+      voicedRingBuffer16k = [];
+      hopBuffer16k = [];
       samplesSinceLastEmit = 0;
       const card = document.getElementById('verdictCard');
       card.className = 'verdict-card';
@@ -932,6 +936,8 @@
 
       card.classList.remove('state-bonafide', 'state-spoof', 'state-silence');
       const scoreSign = chunk.raw_score >= 0 ? '+' : '';
+      const laVal = chunk.la_score !== undefined ? chunk.la_score : chunk.raw_score;
+      const paVal = chunk.pa_penalty !== undefined ? chunk.pa_penalty : 0.0;
 
       if (chunk.verdict === 'SILENCE') {
         card.classList.add('state-silence');
@@ -941,17 +947,24 @@
       } else if (chunk.verdict === 'BONAFIDE') {
         card.classList.add('state-bonafide');
         titleEl.innerHTML = `<span style="color:var(--positive);">🟢 BONAFIDE (SUARA ASLI TERDETEKSI)</span>`;
-        pillEl.textContent = `Skor: ${scoreSign}${chunk.raw_score.toFixed(2)} | Keyakinan: ${chunk.confidence_pct.toFixed(1)}%`;
+        pillEl.textContent = `Skor: ${scoreSign}${chunk.raw_score.toFixed(2)} (LA ${laVal >= 0 ? '+' : ''}${laVal.toFixed(1)}) | Keyakinan: ${chunk.confidence_pct.toFixed(1)}%`;
         markerEl.style.left = `${Math.min(97, Math.max(3, chunk.prob_bonafide_pct))}%`;
       } else {
         card.classList.add('state-spoof');
-        titleEl.innerHTML = `<span style="color:var(--negative);">🔴 FAKE / SPOOF TERDETEKSI (SINTETIS)</span>`;
-        pillEl.textContent = `Skor: ${scoreSign}${chunk.raw_score.toFixed(2)} | Keyakinan Fake: ${chunk.confidence_pct.toFixed(1)}%`;
+        const reasonTag = chunk.spoof_reason === 'PA_REPLAY_TTS'
+          ? 'SPEAKER REPLAY / NEURAL TTS'
+          : (chunk.spoof_reason === 'HYBRID_LA_PA' ? 'VOCODER + SPEAKER REPLAY' : 'VOCODER SINTETIS');
+        titleEl.innerHTML = `<span style="color:var(--negative);">🔴 FAKE / SPOOF (${reasonTag})</span>`;
+        pillEl.textContent = `Skor: ${scoreSign}${chunk.raw_score.toFixed(2)} (LA:${laVal.toFixed(1)} | PA/TTS:${paVal.toFixed(1)}) | Conf: ${chunk.confidence_pct.toFixed(1)}%`;
         markerEl.style.left = `${Math.min(97, Math.max(3, chunk.prob_bonafide_pct))}%`;
       }
 
+      const cues = chunk.pa_cues || {};
+      const cueStr = cues.f0_to_horn !== undefined
+        ? ` | F0/Horn:${cues.f0_to_horn} Horn:${(cues.horn_frac * 100).toFixed(0)}%`
+        : '';
       document.getElementById('subLogits').textContent =
-        `[${chunk.logit_bonafide.toFixed(2)}, ${chunk.logit_spoof.toFixed(2)}]`;
+        `[${chunk.logit_bonafide.toFixed(2)}, ${chunk.logit_spoof.toFixed(2)}] (PA:${paVal.toFixed(1)}${cueStr})`;
       document.getElementById('subLastLatency').textContent =
         `${chunk.inference_ms.toFixed(2)} ms ONNX / ${chunk.total_ms.toFixed(2)} ms Tot (RTF ${chunk.rtf_total.toFixed(4)})`;
       document.getElementById('subVadState').textContent =
@@ -1080,7 +1093,8 @@
         if (c.verdict === 'BONAFIDE') {
           verdictBadge = `<span class="pill-verdict pill-bona">🟢 BONAFIDE</span>`;
         } else if (c.verdict === 'SPOOF') {
-          verdictBadge = `<span class="pill-verdict pill-spoof">🔴 FAKE / SPOOF</span>`;
+          const rTag = c.spoof_reason === 'PA_REPLAY_TTS' ? ' (Replay/TTS)' : '';
+          verdictBadge = `<span class="pill-verdict pill-spoof">🔴 FAKE${rTag}</span>`;
         } else {
           verdictBadge = `<span class="pill-verdict pill-silence">⚪ HENING (VAD)</span>`;
         }
@@ -1092,13 +1106,19 @@
           compCell = `${cc.model_type}: ${cc.inference_ms.toFixed(2)}ms | Skor: ${cc.raw_score >= 0 ? '+' : ''}${cc.raw_score.toFixed(2)} (|Δ|=${diff})`;
         }
 
+        const laVal = c.la_score !== undefined ? c.la_score : c.raw_score;
+        const paVal = c.pa_penalty !== undefined ? c.pa_penalty : 0.0;
+        const logitCol = (paVal !== 0.0)
+          ? `[${c.logit_bonafide.toFixed(1)}, ${c.logit_spoof.toFixed(1)}] (PA:${paVal.toFixed(1)})`
+          : `[${c.logit_bonafide.toFixed(2)}, ${c.logit_spoof.toFixed(2)}]`;
+
         tr.innerHTML = `
           <td>#${c.chunk_index}</td>
           <td>${startSec}s – ${endSec}s</td>
           <td>${verdictBadge}</td>
           <td>${c.verdict === 'SILENCE' ? '—' : c.confidence_pct.toFixed(1) + '%'}</td>
           <td class="${scoreCls}">${scoreSign}${c.raw_score.toFixed(4)}</td>
-          <td>[${c.logit_bonafide.toFixed(2)}, ${c.logit_spoof.toFixed(2)}]</td>
+          <td>${logitCol}</td>
           <td>${(c.db_fs !== undefined ? c.db_fs.toFixed(1) : '—')} dB</td>
           <td>${c.feature_ms.toFixed(2)}</td>
           <td><strong>${c.inference_ms.toFixed(2)}</strong></td>
@@ -1356,32 +1376,61 @@
               const s = chunk16k[i];
               sumSq += s * s;
               ringBuffer16k.push(s);
+              hopBuffer16k.push(s);
               recordedPcm16k.push(s);
             }
             samplesSinceLastEmit += chunk16k.length;
 
-            // Keep ring buffer capped at CHUNK_SAMPLES (20,480 = 1.28s)
+            const rms = Math.sqrt(sumSq / Math.max(1, chunk16k.length) + 1e-12);
+            const db = 20 * Math.log10(Math.max(rms, 1e-7));
+
+            // Only push active voiced callbacks (> -38.5 dBFS) into voicedRingBuffer16k
+            // so room-noise pauses (-43 dBFS) never contaminate the 1.28s LCNN window
+            if (db >= -38.5) {
+              for (let i = 0; i < chunk16k.length; i++) {
+                voicedRingBuffer16k.push(chunk16k[i]);
+              }
+              if (voicedRingBuffer16k.length > CHUNK_SAMPLES) {
+                voicedRingBuffer16k.splice(0, voicedRingBuffer16k.length - CHUNK_SAMPLES);
+              }
+            }
+
+            // Keep raw ring buffer capped at CHUNK_SAMPLES (20,480 = 1.28s)
             if (ringBuffer16k.length > CHUNK_SAMPLES) {
               ringBuffer16k.splice(0, ringBuffer16k.length - CHUNK_SAMPLES);
             }
 
-            const rms = Math.sqrt(sumSq / Math.max(1, chunk16k.length) + 1e-12);
-            const db = 20 * Math.log10(Math.max(rms, 1e-7));
             const pct = Math.max(0, Math.min(100, ((db + 65) / 65) * 100));
             document.getElementById('liveDbText').textContent = `${db.toFixed(1)} dBFS`;
             document.getElementById('rmsLevelBar').style.width = `${pct}%`;
-            document.getElementById('rmsLevelBar').style.background = db > -42 ? '#10b981' : '#64748b';
+            document.getElementById('rmsLevelBar').style.background = db > -38.5 ? '#10b981' : '#64748b';
             document.getElementById('bufferProgressText').textContent =
-              `Window Buffer: ${ringBuffer16k.length} / ${CHUNK_SAMPLES} sampel (Update tiap ${cfg.hop_sec}s)`;
+              `Voiced Buffer: ${voicedRingBuffer16k.length} / ${CHUNK_SAMPLES} sampel (Update tiap ${cfg.hop_sec}s)`;
 
             drawWaveform(ringBuffer16k.slice(-4000), db);
 
-            // Emit 1.28s window every hopSamples (once we have at least 0.64s of audio)
-            if (samplesSinceLastEmit >= hopSamples && ringBuffer16k.length >= 10240) {
+            // Emit every hopSamples:
+            // - If current hop is silent (< -38.0 dBFS), emit raw hopBuffer16k so VAD reports SILENCE
+            // - If current hop has active speech, emit voicedRingBuffer16k once >= 14,400 voiced samples collected
+            if (samplesSinceLastEmit >= hopSamples) {
+              let hopSq = 0;
+              for (let i = 0; i < hopBuffer16k.length; i++) hopSq += hopBuffer16k[i] * hopBuffer16k[i];
+              const hopRms = Math.sqrt(hopSq / Math.max(1, hopBuffer16k.length) + 1e-12);
+              const hopDb = 20 * Math.log10(Math.max(hopRms, 1e-7));
+              hopBuffer16k = [];
               samplesSinceLastEmit = 0;
-              const payload = new Float32Array(ringBuffer16k);
-              if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(payload.buffer);
+
+              if (hopDb < -38.0 && ringBuffer16k.length >= 8000) {
+                const payload = new Float32Array(ringBuffer16k.slice(-hopSamples));
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                  ws.send(payload.buffer);
+                }
+              } else if (voicedRingBuffer16k.length >= 14400) {
+                const activeBuf = cfg.mic_conditioning ? voicedRingBuffer16k : ringBuffer16k;
+                const payload = new Float32Array(activeBuf);
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                  ws.send(payload.buffer);
+                }
               }
             }
           };

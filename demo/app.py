@@ -40,55 +40,117 @@ LFCC_REQUIRED_SAMPLES_128F = 20640
 TARGET_FRAMES = 128
 
 
-def trim_silence_rms(
+def compact_voiced_frames(
     y: np.ndarray,
     frame_len: int = 320,
     hop_len: int = 160,
-    rel_thresh: float = 0.15,
-    abs_Floor: float = 0.003,
+    rel_thresh: float = 0.22,
+    abs_floor: float = 0.0075,
 ) -> tuple[np.ndarray, float]:
     """
-    Strip inter-word silence frames inside a chunk (mitigating H6 silence shortcut)
-    and return (active_audio, active_frame_ratio).
+    Strip inter-word silence and low-SNR room noise frames (< -42 dBFS or < 22% of peak syllable RMS)
+    inside a 1.28s chunk WITHOUT injecting artificial Gaussian white noise dither.
+    Preserves true high-frequency spectral holes of TTS/Replay while preventing pause-induced H6 false spoofs.
     """
+    y = y - float(np.mean(y))
     if len(y) < frame_len:
-        return y, 1.0
+        return y.astype(np.float32), 1.0
     n_f = 1 + (len(y) - frame_len) // hop_len
     frames = np.lib.stride_tricks.as_strided(
         y,
         shape=(n_f, frame_len),
         strides=(y.strides[0] * hop_len, y.strides[0]),
     )
-    rms = np.sqrt(np.mean(frames ** 2, axis=1) + 1e-12)
-    peak_rms = float(np.max(rms))
-    thresh = max(abs_Floor, peak_rms * rel_thresh)
-    keep = rms >= thresh
+    f_rms = np.sqrt(np.mean(frames ** 2, axis=1) + 1e-12)
+    peak_rms = float(np.max(f_rms))
+    thresh = max(abs_floor, peak_rms * rel_thresh)
+    keep = f_rms >= thresh
     active_ratio = float(np.mean(keep))
+    if int(np.sum(keep)) < 8:
+        keep = f_rms >= max(0.0035, peak_rms * 0.15)
+        active_ratio = float(np.mean(keep))
     if int(np.sum(keep)) < 6:
-        return y, active_ratio
+        return y.astype(np.float32), active_ratio
     idx = np.where(keep)[0]
-    active_y = np.concatenate([y[i * hop_len : i * hop_len + hop_len] for i in idx])
-    return active_y.astype(np.float32), active_ratio
+    voiced_y = np.concatenate([y[i * hop_len : i * hop_len + hop_len] for i in idx])
+    return voiced_y.astype(np.float32), active_ratio
 
 
-def condition_live_mic_audio(y: np.ndarray) -> tuple[np.ndarray, float]:
+def compute_pa_tts_penalty(y_voiced: np.ndarray, sr: int = TARGET_SR) -> tuple[float, dict]:
     """
-    Calibrate raw consumer laptop microphone audio to match ASVspoof 2019 LA studio conditions:
-    1. Remove DC offset.
-    2. Strip inter-word silent pauses via frame-level RMS VAD (mitigating H6 silence shortcut).
-    3. Normalize active voiced segments to ASVspoof studio RMS (~0.18).
-    4. Add a natural studio thermal floor (-42 dBFS) so laptop mic high-frequency roll-off (>3.8 kHz)
-       does not trigger the ln(0 + 1e-12) = -27.63 cliff in upper LFCC filterbanks.
+    Hybrid Physical Access (PA Loudspeaker Replay) + Modern Neural TTS (Gemini / Google Maps Voiceover)
+    acoustic detector to complement the ASVspoof 2019 LA LCNN model on live microphone streams:
+    1. Transducer Bass Roll-off & Mid-Horn Resonance (f0_to_horn, low_to_horn, horn_frac):
+       Phone/laptop loudspeakers physically attenuate fundamental F0 (75-340 Hz) and concentrate
+       acoustic energy in the 800-3,800 Hz horn resonance band.
+    2. Neural TTS Pitch Over-Smoothing & Broadcast AGC Compression (jitter, std_nacf, env_cv):
+       Neural TTS voiceovers (Gemini, Google Maps) exhibit ultra-smooth pitch trajectories and
+       narrow dynamic range compared to spontaneous human speech.
     """
-    y = y - float(np.mean(y))
-    y_active, active_ratio = trim_silence_rms(y, rel_thresh=0.15)
-    rms = float(np.sqrt(np.mean(y_active ** 2) + 1e-12))
-    y_norm = y_active * (0.18 / rms)
-    y_norm = np.clip(y_norm, -0.98, 0.98)
-    seed = int(abs(float(np.sum(y_norm)) * 1000.0)) % 10007
-    rng = np.random.default_rng(seed)
-    dither = rng.normal(0.0, 0.0075, size=len(y_norm)).astype(np.float32)
-    return (y_norm + dither).astype(np.float32), active_ratio
+    if len(y_voiced) < 1600:
+        return 0.0, {"f0_to_horn": 0.0, "low_to_horn": 0.0, "horn_frac": 0.0, "jitter": 0.0, "env_cv": 0.0}
+
+    yv = y_voiced - float(np.mean(y_voiced))
+    yv_norm = yv / (float(np.sqrt(np.mean(yv ** 2))) + 1e-9)
+
+    freqs, psd = scipy.signal.welch(yv_norm, fs=sr, nperseg=min(512, len(yv_norm)))
+    e_tot = float(np.sum(psd[(freqs >= 60) & (freqs <= 7800)]) + 1e-12)
+    e_f0 = float(np.sum(psd[(freqs >= 75) & (freqs <= 340)]) + 1e-12)
+    e_lowmid = float(np.sum(psd[(freqs > 340) & (freqs <= 780)]) + 1e-12)
+    e_horn = float(np.sum(psd[(freqs > 800) & (freqs <= 3800)]) + 1e-12)
+
+    f0_to_horn = e_f0 / e_horn
+    low_to_horn = (e_f0 + 0.65 * e_lowmid) / e_horn
+    horn_frac = e_horn / e_tot
+
+    n_f = max(1, len(yv_norm) // 320)
+    frames = yv_norm[: n_f * 320].reshape(n_f, 320)
+    f_rms = np.sqrt(np.mean(frames ** 2, axis=1) + 1e-12)
+    env_cv = float(np.std(f_rms) / (np.mean(f_rms) + 1e-9))
+
+    nacf_peaks = []
+    lags = []
+    for fr in frames:
+        fr0 = fr - np.mean(fr)
+        nrm = float(np.sum(fr0 ** 2)) + 1e-12
+        acf = np.correlate(fr0, fr0, mode="full")[319:] / nrm
+        sub = acf[32:200]
+        pk = int(np.argmax(sub))
+        val = float(sub[pk])
+        nacf_peaks.append(val)
+        if val > 0.45:
+            lags.append(pk + 32)
+    std_nacf = float(np.std(nacf_peaks)) if len(nacf_peaks) > 1 else 0.05
+    if len(lags) >= 4:
+        diffs = np.abs(np.diff(lags)) / (np.array(lags[:-1], dtype=np.float32) + 1e-6)
+        valid = diffs[diffs < 0.22]
+        jitter = float(np.mean(valid)) if len(valid) > 0 else 0.015
+    else:
+        jitter = 0.015
+
+    penalty = 0.0
+    # 1. Loudspeaker / Phone Speaker Bass Roll-off & Horn Concentration (PA Replay)
+    if f0_to_horn < 4.20:
+        penalty -= (4.20 - f0_to_horn) * 5.5
+    if low_to_horn < 5.00:
+        penalty -= (5.00 - low_to_horn) * 4.5
+    if horn_frac > 0.12:
+        penalty -= (horn_frac - 0.12) * 55.0
+
+    # 2. Neural TTS Pitch Regularity & Broadcast AGC Envelope Compression (Gemini / GMaps Voiceover)
+    if jitter < 0.0080 and std_nacf < 0.045:
+        penalty -= (0.0085 - jitter) * 850.0
+    if env_cv < 0.27 and horn_frac > 0.11:
+        penalty -= (0.28 - env_cv) * 65.0
+
+    cues = {
+        "f0_to_horn": round(f0_to_horn, 2),
+        "low_to_horn": round(low_to_horn, 2),
+        "horn_frac": round(horn_frac, 3),
+        "jitter": round(jitter, 4),
+        "env_cv": round(env_cv, 2),
+    }
+    return float(penalty), cues
 
 
 class ONNXChunkInferenceEngine:
@@ -127,16 +189,15 @@ class ONNXChunkInferenceEngine:
         threshold: float = 0.0,
         vad_guard: bool = True,
         vad_rms_threshold: float = 0.007,
-        mic_conditioning: bool = False,
+        mic_conditioning: bool = True,
     ) -> dict:
         """
         Run full end-to-end pipeline on a single 1.28s audio chunk:
         1. Compute RMS energy, dBFS, and Voice Activity Detection (VAD) state
-        2. Optionally apply Live Microphone Studio Conditioning (for live WebSocket mic streams)
-        3. Pad/wrap chunk to produce exactly 128 LFCC frames
-        4. Extract 60-dim LFCC via vocal_guard.features.extract_lfcc
-        5. Run ONNX Runtime inference
-        6. Return verdict (BONAFIDE / SPOOF / SILENCE), confidence, raw score, logits, latency, and RTF
+        2. Compact voiced frames (stripping inter-word silence without artificial white noise dither)
+        3. Extract 60-dim LFCC via vocal_guard.features.extract_lfcc & run ONNX LCNN inference
+        4. Compute Hybrid PA Replay + Neural TTS penalty (for phone/speaker replay of Gemini/GMaps TTS)
+        5. Return verdict (BONAFIDE / SPOOF / SILENCE), confidence, scores, cues, latency, and RTF
         """
         if model_type not in self.sessions:
             model_type = "fp32"
@@ -145,18 +206,18 @@ class ONNXChunkInferenceEngine:
 
         t_start = time.perf_counter()
 
-        # Ensure 1D float32 and measure raw signal energy before any conditioning
+        # Ensure 1D float32 and measure raw signal energy before compaction
         y_raw = np.asarray(audio_chunk_16k, dtype=np.float32).reshape(-1)
         rms_energy = float(np.sqrt(np.mean(y_raw ** 2) + 1e-12))
         peak_amp = float(np.max(np.abs(y_raw))) if len(y_raw) > 0 else 0.0
         db_fs = float(20.0 * np.log10(max(rms_energy, 1e-7)))
 
+        y_voiced, active_ratio = compact_voiced_frames(y_raw)
         if mic_conditioning:
-            y_proc, active_ratio = condition_live_mic_audio(y_raw)
-            is_speech = bool(rms_energy >= vad_rms_threshold and active_ratio >= 0.12)
+            y_proc = y_voiced
+            is_speech = bool(rms_energy >= vad_rms_threshold and active_ratio >= 0.14)
         else:
             y_proc = y_raw
-            _, active_ratio = trim_silence_rms(y_raw)
             is_speech = bool(rms_energy >= vad_rms_threshold)
 
         y_padded = pad_or_truncate(y_proc, target_length=LFCC_REQUIRED_SAMPLES_128F)
@@ -169,6 +230,7 @@ class ONNXChunkInferenceEngine:
             else:
                 lfcc = np.pad(lfcc, ((0, TARGET_FRAMES - lfcc.shape[0]), (0, 0)))
         feat_tensor = np.expand_dims(np.expand_dims(lfcc.T.astype(np.float32), axis=0), axis=0)  # (1, 1, 60, 128)
+        pa_penalty, pa_cues = compute_pa_tts_penalty(y_voiced, sr=TARGET_SR) if mic_conditioning else (0.0, {})
         t_feat_end = time.perf_counter()
 
         # ONNX Inference
@@ -178,7 +240,8 @@ class ONNXChunkInferenceEngine:
 
         logit_bonafide = float(logits[0, 0])
         logit_spoof = float(logits[0, 1])
-        raw_score = logit_bonafide - logit_spoof
+        la_score = logit_bonafide - logit_spoof
+        raw_score = la_score + pa_penalty
 
         # Calibrated sigmoid probability around decision threshold (temperature T=4.0 for smooth UI gauge)
         shifted_score = (raw_score - threshold) / 4.0
@@ -189,12 +252,20 @@ class ONNXChunkInferenceEngine:
         if vad_guard and not is_speech:
             verdict = "SILENCE"
             confidence_pct = 0.0
+            spoof_reason = "SILENCE"
         elif raw_score >= threshold:
             verdict = "BONAFIDE"
             confidence_pct = round(prob_bonafide * 100.0, 1)
+            spoof_reason = "DIRECT_VOICE"
         else:
             verdict = "SPOOF"
             confidence_pct = round(prob_spoof * 100.0, 1)
+            if la_score < threshold and pa_penalty < -2.5:
+                spoof_reason = "HYBRID_LA_PA"
+            elif pa_penalty < -2.5:
+                spoof_reason = "PA_REPLAY_TTS"
+            else:
+                spoof_reason = "LA_VOCODER"
 
         feat_ms = (t_feat_end - t_feat_start) * 1000.0
         infer_ms = (t_inf_end - t_inf_start) * 1000.0
@@ -208,11 +279,15 @@ class ONNXChunkInferenceEngine:
             "duration_sec": CHUNK_DURATION_SEC,
             "model_type": model_type.upper(),
             "verdict": verdict,
+            "spoof_reason": spoof_reason,
             "confidence_pct": confidence_pct,
             "prob_bonafide_pct": round(prob_bonafide * 100.0, 1),
             "prob_spoof_pct": round(prob_spoof * 100.0, 1),
             "threshold": round(threshold, 4),
             "raw_score": round(raw_score, 4),
+            "la_score": round(la_score, 4),
+            "pa_penalty": round(pa_penalty, 4),
+            "pa_cues": pa_cues,
             "logit_bonafide": round(logit_bonafide, 4),
             "logit_spoof": round(logit_spoof, 4),
             "feature_ms": round(feat_ms, 2),
@@ -404,13 +479,38 @@ async def analyze_file(
     return response
 
 
+def _apply_ema_to_chunk(res: dict, prev_ema: float | None, threshold: float, alpha: float = 0.65) -> float | None:
+    """Smooth active speech chunk scores with a 2-chunk EMA to prevent single-hop boundary jitter."""
+    if res.get("verdict") == "SILENCE":
+        return prev_ema
+    cur = float(res["raw_score"])
+    ema = cur if prev_ema is None else (alpha * cur + (1.0 - alpha) * prev_ema)
+    res["raw_score_unsmoothed"] = round(cur, 4)
+    res["raw_score"] = round(ema, 4)
+    shifted = float(np.clip((ema - threshold) / 4.0, -20.0, 20.0))
+    prob_bona = float(1.0 / (1.0 + np.exp(-shifted)))
+    prob_spoof = 1.0 - prob_bona
+    res["prob_bonafide_pct"] = round(prob_bona * 100.0, 1)
+    res["prob_spoof_pct"] = round(prob_spoof * 100.0, 1)
+    if ema >= threshold:
+        res["verdict"] = "BONAFIDE"
+        res["confidence_pct"] = round(prob_bona * 100.0, 1)
+        res["spoof_reason"] = "DIRECT_VOICE"
+    else:
+        res["verdict"] = "SPOOF"
+        res["confidence_pct"] = round(prob_spoof * 100.0, 1)
+        if res.get("spoof_reason") == "DIRECT_VOICE":
+            res["spoof_reason"] = "PA_REPLAY_TTS" if res.get("pa_penalty", 0.0) < -2.0 else "LA_VOCODER"
+    return ema
+
+
 @app.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket):
     """
     Real-time WebSocket endpoint receiving raw Float32 PCM chunks (20,480 samples @ 16kHz)
     and returning live detection verdict + full metrics per chunk.
     Supports live side-by-side FP32 vs INT8 comparison, configurable threshold/VAD,
-    and Live Microphone Studio Conditioning (default True).
+    and Hybrid LA + PA/TTS Live Microphone Conditioning (default True).
     """
     await websocket.accept()
     q = websocket.query_params
@@ -422,6 +522,8 @@ async def websocket_stream(websocket: WebSocket):
     mic_conditioning: bool = q.get("mic_conditioning", "true").lower() == "true"
     hop_sec: float = float(q.get("hop_sec", "0.50"))
     chunk_idx = 0
+    ema_p: float | None = None
+    ema_s: float | None = None
 
     try:
         while True:
@@ -446,6 +548,8 @@ async def websocket_stream(websocket: WebSocket):
                         hop_sec = float(cmd["hop_sec"])
                     if cmd.get("action") == "reset":
                         chunk_idx = 0
+                        ema_p = None
+                        ema_s = None
                     await websocket.send_json({
                         "type": "config_ack",
                         "model_type": m_type.upper(),
@@ -473,6 +577,8 @@ async def websocket_stream(websocket: WebSocket):
                     vad_guard=vad_guard,
                     mic_conditioning=mic_conditioning,
                 )
+                if mic_conditioning:
+                    ema_p = _apply_ema_to_chunk(res_p, ema_p, threshold=threshold)
                 res_p["start_sec"] = start_sec
                 res_p["end_sec"] = end_sec
                 res_p["type"] = "chunk_result"
@@ -487,6 +593,8 @@ async def websocket_stream(websocket: WebSocket):
                         vad_guard=vad_guard,
                         mic_conditioning=mic_conditioning,
                     )
+                    if mic_conditioning:
+                        ema_s = _apply_ema_to_chunk(res_s, ema_s, threshold=threshold)
                     res_s["start_sec"] = start_sec
                     res_s["end_sec"] = end_sec
                     res_p["comparison"] = res_s
