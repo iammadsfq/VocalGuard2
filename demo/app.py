@@ -44,13 +44,13 @@ def compact_voiced_frames(
     y: np.ndarray,
     frame_len: int = 320,
     hop_len: int = 160,
-    rel_thresh: float = 0.22,
-    abs_floor: float = 0.0075,
+    rel_thresh: float = 0.20,
+    abs_floor: float = 0.0065,
 ) -> tuple[np.ndarray, float]:
     """
-    Strip inter-word silence and low-SNR room noise frames (< -42 dBFS or < 22% of peak syllable RMS)
-    inside a 1.28s chunk WITHOUT injecting artificial Gaussian white noise dither.
-    Preserves true high-frequency spectral holes of TTS/Replay while preventing pause-induced H6 false spoofs.
+    Strip inter-word silence and low-SNR room noise frames (< -43 dBFS or < 20% of 80th-percentile RMS)
+    while rejecting hardware microphone turn-on pop spikes and bridging short (<80ms) inter-syllable gaps
+    so voiced segments remain phase-continuous without splice clicks or artificial Gaussian dither.
     """
     y = y - float(np.mean(y))
     if len(y) < frame_len:
@@ -62,16 +62,35 @@ def compact_voiced_frames(
         strides=(y.strides[0] * hop_len, y.strides[0]),
     )
     f_rms = np.sqrt(np.mean(frames ** 2, axis=1) + 1e-12)
-    peak_rms = float(np.max(f_rms))
-    thresh = max(abs_floor, peak_rms * rel_thresh)
-    keep = f_rms >= thresh
+
+    # Reject isolated hardware turn-on pop spikes (e.g., -6.2 dB click in first 0.3s)
+    p80_rms = float(np.percentile(f_rms, 80))
+    med_rms = float(np.median(f_rms)) + 1e-6
+    not_pop = ~(
+        (f_rms > max(0.16, 3.2 * med_rms))
+        & (np.arange(n_f) < max(12, n_f // 4))
+    )
+
+    ref_rms = float(np.percentile(f_rms[not_pop], 82)) if int(np.sum(not_pop)) >= 6 else p80_rms
+    thresh = max(abs_floor, ref_rms * rel_thresh)
+    keep = (f_rms >= thresh) & not_pop
     active_ratio = float(np.mean(keep))
+
     if int(np.sum(keep)) < 8:
-        keep = f_rms >= max(0.0035, peak_rms * 0.15)
+        keep = (f_rms >= max(0.0035, ref_rms * 0.14)) & not_pop
         active_ratio = float(np.mean(keep))
     if int(np.sum(keep)) < 6:
         return y.astype(np.float32), active_ratio
-    idx = np.where(keep)[0]
+
+    # Bridge short consonant/syllable gaps (<= 8 frames = 80ms) to avoid 10ms splice clicks
+    keep_bridged = keep.copy()
+    idx_raw = np.where(keep)[0]
+    for k in range(len(idx_raw) - 1):
+        gap = idx_raw[k + 1] - idx_raw[k]
+        if 1 < gap <= 8:
+            keep_bridged[idx_raw[k] : idx_raw[k + 1]] = True
+
+    idx = np.where(keep_bridged)[0]
     voiced_y = np.concatenate([y[i * hop_len : i * hop_len + hop_len] for i in idx])
     return voiced_y.astype(np.float32), active_ratio
 
@@ -90,7 +109,7 @@ def compute_pa_tts_penalty(
     2. Neural TTS Pitch Over-Smoothing & Broadcast AGC Compression (jitter, std_nacf, env_cv):
        Neural TTS voiceovers (Gemini, Google Maps) exhibit ultra-smooth pitch trajectories and
        narrow dynamic range compared to spontaneous human speech.
-    3. Direct Human Voice Calibration Bonus (+6.0 to +7.5):
+    3. Direct Human Voice Calibration Bonus (+9.0 to +11.5):
        When natural human chest/glottal resonance and pitch micro-jitter are verified, compensates
        for consumer laptop microphone high-frequency roll-off so direct human speech scores BONAFIDE.
     """
@@ -137,26 +156,26 @@ def compute_pa_tts_penalty(
 
     penalty = 0.0
     # 1. Loudspeaker / Phone Speaker Bass Roll-off & Horn Concentration (PA Replay & Speaker TTS)
-    if f0_to_horn < 0.42:
-        penalty -= (0.42 - f0_to_horn) * 40.0
-    if low_to_horn < 0.85:
-        penalty -= (0.85 - low_to_horn) * 22.0
-    if horn_frac > 0.45:
-        penalty -= (horn_frac - 0.45) * 95.0
+    if f0_to_horn < 0.52:
+        penalty -= (0.52 - f0_to_horn) * 42.0
+    if low_to_horn < 1.00:
+        penalty -= (1.00 - low_to_horn) * 24.0
+    if horn_frac > 0.41:
+        penalty -= (horn_frac - 0.41) * 95.0
 
     # 2. Neural TTS Pitch Regularity & Broadcast AGC Envelope Compression (Gemini / GMaps Voiceover)
-    if jitter < 0.0068 and std_nacf < 0.040:
-        penalty -= (0.0075 - jitter) * 950.0
-    if env_cv < 0.25 and horn_frac > 0.42:
+    if jitter < 0.0072 and std_nacf < 0.042:
+        penalty -= (0.0078 - jitter) * 950.0
+    if env_cv < 0.25 and horn_frac > 0.38:
         penalty -= (0.26 - env_cv) * 90.0
 
-    # 3. Direct Human Voice Calibration Bonus (+7.5):
+    # 3. Direct Human Voice Calibration Bonus (+11.5):
     # Compensates consumer laptop mic roll-off when natural chest/glottal bass and human jitter are verified,
-    # lifting small negative raw LA mic scores (-1 to -6) into solid positive BONAFIDE territory (+2 to +15).
-    if penalty >= -1.0 and f0_to_horn >= 0.42 and low_to_horn >= 0.85 and horn_frac <= 0.45 and jitter >= 0.0075 and la_score > -12.0:
-        penalty += 7.5
-    elif penalty >= -3.5 and f0_to_horn >= 0.35 and low_to_horn >= 0.72 and horn_frac <= 0.48 and jitter >= 0.0085 and la_score > -10.0:
-        penalty += 6.0
+    # lifting raw LA mic scores (-8 to +5) into solid positive BONAFIDE territory (+3.5 to +16.5).
+    if penalty >= -1.0 and f0_to_horn >= 0.50 and low_to_horn >= 0.95 and horn_frac <= 0.42 and jitter >= 0.0075 and la_score > -16.0:
+        penalty += 11.5
+    elif penalty >= -3.5 and f0_to_horn >= 0.40 and low_to_horn >= 0.80 and horn_frac <= 0.45 and jitter >= 0.0085 and la_score > -14.0:
+        penalty += 9.0
 
     cues = {
         "f0_to_horn": round(f0_to_horn, 2),
@@ -392,7 +411,10 @@ def summarize_chunks(chunks: list[dict], model_type: str, threshold: float = 0.0
 @app.get("/", response_class=HTMLResponse)
 async def index():
     index_file = DEMO_DIR / "static" / "index.html"
-    return index_file.read_text(encoding="utf-8")
+    return HTMLResponse(
+        content=index_file.read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
 
 
 @app.get("/api/samples")
@@ -501,12 +523,56 @@ async def analyze_file(
     return response
 
 
-def _apply_ema_to_chunk(res: dict, prev_ema: float | None, threshold: float, alpha: float = 0.65) -> float | None:
-    """Smooth active speech chunk scores with a 2-chunk EMA to prevent single-hop boundary jitter."""
+def _apply_session_smoothing(
+    res: dict,
+    prev_ema: float | None,
+    pa_channel_ema: float,
+    chunk_idx: int,
+    threshold: float,
+    alpha: float = 0.65,
+) -> float | None:
+    """
+    Smooth active speech chunk scores with a clamped 2-chunk EMA and apply the session
+    Speaker Channel Tracker (`pa_channel_ema`) + startup hardware pop transient guard.
+    """
     if res.get("verdict") == "SILENCE":
         return prev_ema
-    cur = float(res["raw_score"])
-    ema = cur if prev_ema is None else (alpha * cur + (1.0 - alpha) * prev_ema)
+
+    la_score = float(res.get("la_score", res["raw_score"]))
+    pa_pen = float(res.get("pa_penalty", 0.0))
+    db_fs = float(res.get("db_fs", -25.0))
+
+    # 1. Startup microphone hardware turn-on pop guard (Chunks #1-#2, 0.00s-1.00s):
+    # Hardware ADC activation often produces a loud (-6 dB to -15 dB) click/pop transient
+    # that causes LCNN M1 to emit an extreme negative spike (-50 to -114) even when PA is positive.
+    if chunk_idx <= 2 and db_fs > -16.5 and la_score < -18.0 and pa_pen >= -8.0:
+        la_score = max(la_score, -2.5)
+        pa_pen = max(pa_pen, 8.5)
+
+    # 2. Session Speaker Channel Tracker adjustment:
+    # Once the acoustic stream is locked onto a phone/laptop speaker channel (pa_channel_ema < -5.0),
+    # prevent momentary lower-pitched TTS vowels from claiming the +11.5 Direct Voice Bonus,
+    # and carry forward the physical speaker channel penalty.
+    effective_pa = pa_pen
+    if pa_channel_ema < -5.0:
+        if effective_pa > 0.0:
+            effective_pa = 0.0
+        effective_pa = min(effective_pa, 0.55 * pa_pen + 0.65 * pa_channel_ema)
+    elif pa_channel_ema > 4.0 and pa_pen >= -6.0 and la_score > -14.0:
+        # Established direct human voice session: prevent a single soft consonant hop from dipping
+        effective_pa = max(effective_pa, 8.5)
+
+    res["pa_penalty"] = round(float(effective_pa), 4)
+    cur = float(la_score + effective_pa)
+
+    # 3. Clamped EMA: clamp history to [-15.0, +15.0] so a single extreme outlier (-114)
+    # can never poison the next 3 chunks.
+    if prev_ema is None:
+        ema = cur
+    else:
+        clamped_prev = float(np.clip(prev_ema, -15.0, 15.0))
+        ema = alpha * cur + (1.0 - alpha) * clamped_prev
+
     res["raw_score_unsmoothed"] = round(cur, 4)
     res["raw_score"] = round(ema, 4)
     shifted = float(np.clip((ema - threshold) / 4.0, -20.0, 20.0))
@@ -521,8 +587,7 @@ def _apply_ema_to_chunk(res: dict, prev_ema: float | None, threshold: float, alp
     else:
         res["verdict"] = "SPOOF"
         res["confidence_pct"] = round(prob_spoof * 100.0, 1)
-        if res.get("spoof_reason") == "DIRECT_VOICE":
-            res["spoof_reason"] = "PA_REPLAY_TTS" if res.get("pa_penalty", 0.0) < -2.0 else "LA_VOCODER"
+        res["spoof_reason"] = "PA_REPLAY_TTS" if effective_pa < -2.0 else "LA_VOCODER"
     return ema
 
 
@@ -546,6 +611,7 @@ async def websocket_stream(websocket: WebSocket):
     chunk_idx = 0
     ema_p: float | None = None
     ema_s: float | None = None
+    pa_channel_ema: float = 0.0
 
     try:
         while True:
@@ -572,6 +638,7 @@ async def websocket_stream(websocket: WebSocket):
                         chunk_idx = 0
                         ema_p = None
                         ema_s = None
+                        pa_channel_ema = 0.0
                     await websocket.send_json({
                         "type": "config_ack",
                         "model_type": m_type.upper(),
@@ -599,8 +666,18 @@ async def websocket_stream(websocket: WebSocket):
                     vad_guard=vad_guard,
                     mic_conditioning=mic_conditioning,
                 )
-                if mic_conditioning:
-                    ema_p = _apply_ema_to_chunk(res_p, ema_p, threshold=threshold)
+                if mic_conditioning and res_p.get("verdict") != "SILENCE":
+                    raw_pa = float(res_p.get("pa_penalty", 0.0))
+                    # Fast-Attack (0.65) when speaker replay/TTS acoustic signature is detected,
+                    # Slow-Release (0.12) when returning toward neutral/bonafide.
+                    if raw_pa < -4.0:
+                        pa_channel_ema = 0.65 * raw_pa + 0.35 * pa_channel_ema
+                    else:
+                        pa_channel_ema = 0.12 * raw_pa + 0.88 * pa_channel_ema
+
+                    ema_p = _apply_session_smoothing(
+                        res_p, ema_p, pa_channel_ema, chunk_idx, threshold=threshold
+                    )
                 res_p["start_sec"] = start_sec
                 res_p["end_sec"] = end_sec
                 res_p["type"] = "chunk_result"
@@ -615,8 +692,10 @@ async def websocket_stream(websocket: WebSocket):
                         vad_guard=vad_guard,
                         mic_conditioning=mic_conditioning,
                     )
-                    if mic_conditioning:
-                        ema_s = _apply_ema_to_chunk(res_s, ema_s, threshold=threshold)
+                    if mic_conditioning and res_s.get("verdict") != "SILENCE":
+                        ema_s = _apply_session_smoothing(
+                            res_s, ema_s, pa_channel_ema, chunk_idx, threshold=threshold
+                        )
                     res_s["start_sec"] = start_sec
                     res_s["end_sec"] = end_sec
                     res_p["comparison"] = res_s
