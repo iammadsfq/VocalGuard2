@@ -137,25 +137,25 @@ def compute_pa_tts_penalty(
 
     penalty = 0.0
     # 1. Loudspeaker / Phone Speaker Bass Roll-off & Horn Concentration (PA Replay & Speaker TTS)
-    if f0_to_horn < 0.75:
-        penalty -= (0.75 - f0_to_horn) * 28.0
-    if low_to_horn < 1.35:
-        penalty -= (1.35 - low_to_horn) * 16.0
-    if horn_frac > 0.35:
-        penalty -= (horn_frac - 0.35) * 85.0
+    if f0_to_horn < 0.42:
+        penalty -= (0.42 - f0_to_horn) * 40.0
+    if low_to_horn < 0.85:
+        penalty -= (0.85 - low_to_horn) * 22.0
+    if horn_frac > 0.45:
+        penalty -= (horn_frac - 0.45) * 95.0
 
     # 2. Neural TTS Pitch Regularity & Broadcast AGC Envelope Compression (Gemini / GMaps Voiceover)
-    if jitter < 0.0070 and std_nacf < 0.042:
+    if jitter < 0.0068 and std_nacf < 0.040:
         penalty -= (0.0075 - jitter) * 950.0
-    if env_cv < 0.25 and horn_frac > 0.32:
+    if env_cv < 0.25 and horn_frac > 0.42:
         penalty -= (0.26 - env_cv) * 90.0
 
     # 3. Direct Human Voice Calibration Bonus (+7.5):
     # Compensates consumer laptop mic roll-off when natural chest/glottal bass and human jitter are verified,
     # lifting small negative raw LA mic scores (-1 to -6) into solid positive BONAFIDE territory (+2 to +15).
-    if penalty >= -1.0 and f0_to_horn >= 0.75 and low_to_horn >= 1.35 and horn_frac <= 0.35 and jitter >= 0.0075 and la_score > -12.0:
+    if penalty >= -1.0 and f0_to_horn >= 0.42 and low_to_horn >= 0.85 and horn_frac <= 0.45 and jitter >= 0.0075 and la_score > -12.0:
         penalty += 7.5
-    elif penalty >= -3.5 and f0_to_horn >= 0.60 and low_to_horn >= 1.15 and horn_frac <= 0.38 and jitter >= 0.0085 and la_score > -10.0:
+    elif penalty >= -3.5 and f0_to_horn >= 0.35 and low_to_horn >= 0.72 and horn_frac <= 0.48 and jitter >= 0.0085 and la_score > -10.0:
         penalty += 6.0
 
     cues = {
